@@ -4434,6 +4434,9 @@ async def ask_confirm(interaction, op, title, runner):
 async def stop(interaction: discord.Interaction):
     if not await gate(interaction):
         return
+    if _stress_running:
+        await deny(interaction, "Cannot shut off server during a test.")
+        return
     await ask_confirm(interaction, "stop", "**Stop the Minecraft server?**", run_stop)
 
 
@@ -5574,6 +5577,8 @@ async def chat_backup_loop():
                     spawn(chat_tps())
                 elif player and message.split()[0].lower() == "!start":
                     spawn(chat_start(player))
+                if _stress_running and "joined the game" in line:
+                    spawn(stress_warn())
         except Exception:
             log.exception("Chat backup watch failed")
         await asyncio.sleep(LOG_TAIL_INTERVAL)
@@ -7133,28 +7138,54 @@ async def health_snapshot():
 
 
 class StressView(discord.ui.View):
+    """Persistent Stop button. custom_id keeps it alive past 15 minutes."""
+
     def __init__(self, stop_event):
         super().__init__(timeout=None)
         self.stop_event = stop_event
 
-    @discord.ui.button(label="Stop test", style=discord.ButtonStyle.danger, custom_id="stresstest:stop")
+    @discord.ui.button(
+        label="Stop test",
+        style=discord.ButtonStyle.danger,
+        custom_id="stresstest:stop",
+    )
     async def stop_test(self, interaction, button):
-        if not await gate(interaction, admin=True):
+        if not member_is_admin(interaction):
+            await deny(interaction, "Only an admin can stop the test.")
             return
         self.stop_event.set()
-        await interaction.response.defer()
+        button.disabled = True
+        try:
+            await interaction.response.edit_message(
+                embed=panel("Stress test", ["Stopping. Restoring blocks."], COLOR_WAIT),
+                view=self,
+            )
+        except EDIT_ERRORS:
+            if not interaction.response.is_done():
+                await interaction.response.defer()
+
+
+STRESS_WARN = "Long duration validation test underway. Changes you make will NOT be saved."
+STRESS_MAX_MINUTES = 300  # 5 hours
+
+
+async def stress_warn():
+    """Red line in Minecraft chat. tellraw, because say cannot colour text."""
+
+    payload = json.dumps({"text": f"[bot] {STRESS_WARN}", "color": "red"})
+    await send_console(f"tellraw @a {payload}", timeout=4)
 
 
 @bot.tree.command(name="stresstest", description="Randomised 4-player load, network, and health log")
-@app_commands.describe(minutes="How long. Default 5, maximum 60")
-async def stresstest(interaction: discord.Interaction, minutes: typing.Optional[int] = 5):
+@app_commands.describe(minutes="Minutes. Default 20, maximum 300")
+async def stresstest(interaction: discord.Interaction, minutes: typing.Optional[int] = 20):
     global _stress_running
     if not await gate(interaction, admin=True):
         return
     if _stress_running:
         await deny(interaction, "A stress test is already running.")
         return
-    minutes = 5 if minutes is None else max(1, min(60, minutes))
+    minutes = 20 if minutes is None else max(1, min(STRESS_MAX_MINUTES, minutes))
     if not await server_running():
         await deny(interaction, "Start the server first.")
         return
@@ -7177,8 +7208,13 @@ async def stresstest(interaction: discord.Interaction, minutes: typing.Optional[
         raise
     log_path = os.path.join(BOT_LOG_DIR, "stresstest.log")
     deadline = time.monotonic() + minutes * 60
+    next_warn = 0.0
+    await send_console("save-off", timeout=4)
     try:
         while time.monotonic() < deadline and not stop_event.is_set():
+            if time.monotonic() >= next_warn:
+                await stress_warn()
+                next_warn = time.monotonic() + 120
             try:
                 if random.random() < 0.65:
                     world_note = await stress_world_burst(placed)
@@ -7221,7 +7257,9 @@ async def stresstest(interaction: discord.Interaction, minutes: typing.Optional[
     finally:
         left = await restore_blocks(placed)
         await send_console('kill @e[tag=stresstest]', timeout=4)
+        await send_console("save-on", timeout=4)
         _stress_running = False
+        view.stop()
         done = [f"Log: `{log_path}`"]
         if left:
             done.append(f"{len(left)} blocks could not be restored. Check the log.")
