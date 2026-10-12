@@ -256,7 +256,7 @@ def warn_throttled(key, message, *args, every=300):
 # CONFIG
 # ============================================================
 
-VERSION = "1.20"
+VERSION = "1.201"
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = env_int("DISCORD_GUILD_ID", 0)
@@ -7277,6 +7277,9 @@ async def stress_stop_server(status):
 
 
 async def stress_start_server(status):
+    # The wake listener owns 25565 while the server is down. Paper cannot bind
+    # until that listener is closed.
+    await close_wake_listener()
     await asyncio.sleep(PORT_WAIT)
     cursor = LogCursor()
     launch = await launch_server()
@@ -7301,7 +7304,9 @@ async def stress_snapshot(status):
         await stress_start_server(status)
         return None
     if not await stress_start_server(status):
-        return None
+        await status.set("Backup is saved, but the server did not come back. Trying again.")
+        if not await stress_start_server(status):
+            return None
     return folder
 
 
@@ -7322,18 +7327,29 @@ async def stress_restore_world(status, folder):
     return await stress_start_server(status)
 
 
+async def stress_load_area(x, z, size=32):
+    """forceload a square so fill and summon actually run. Both no-op on unloaded chunks."""
+
+    await send_console(
+        f"forceload add {x} {z} {x + size} {z + size}",
+        timeout=8,
+    )
+    await asyncio.sleep(0.4)
+
+
 async def stress_heavy_burst():
     """One destructive burst. The world is restored from the snapshot afterwards."""
 
     base_x = random.randint(-2000, 2000)
     base_z = random.randint(-2000, 2000)
-    y = random.randint(70, 110)
+    y = random.randint(80, 120)
     notes = []
     kind = random.choice(("place", "chunks", "elytra", "explode", "village", "mobs"))
     if kind == "place":
+        await stress_load_area(base_x, base_z, 96)
         for n in range(4):
-            x = base_x + n * 24
-            z = base_z + n * 18
+            x = base_x + n * 20
+            z = base_z + n * 16
             await send_console(
                 f"fill {x} {y} {z} {x + 6} {y + 4} {z + 6} minecraft:cobblestone",
                 timeout=6,
@@ -7345,50 +7361,45 @@ async def stress_heavy_burst():
         notes.append(f"4 players placed and broke near {base_x},{base_z}")
     elif kind == "chunks":
         await send_console(
-            f"forceload add {base_x} {base_z} {base_x + 128} {base_z + 128}",
+            f"forceload add {base_x} {base_z} {base_x + 144} {base_z + 144}",
             timeout=8,
         )
-        notes.append(f"loaded a 128 block square at {base_x},{base_z}")
-        await asyncio.sleep(random.uniform(1, 3))
-        await send_console(
-            f"forceload remove {base_x} {base_z} {base_x + 128} {base_z + 128}",
-            timeout=6,
-        )
+        await asyncio.sleep(random.uniform(2, 4))
+        notes.append(f"loaded a 144 block square at {base_x},{base_z}")
     elif kind == "elytra":
-        # A fast flight loads a long line of new chunks.
-        dx, dz = random.choice(((48, 0), (-48, 0), (0, 48), (0, -48), (32, 32)))
+        dx, dz = random.choice(((64, 0), (-64, 0), (0, 64), (0, -64), (48, 48)))
         x, z = base_x, base_z
-        for _ in range(random.randint(6, 12)):
-            await send_console(f"forceload add {x} {z} {x + 16} {z + 16}", timeout=4)
+        for _ in range(random.randint(8, 14)):
+            await send_console(f"forceload add {x} {z} {x + 31} {z + 31}", timeout=4)
             x += dx
             z += dz
-            await asyncio.sleep(0.15)
+            await asyncio.sleep(0.35)
         notes.append(f"elytra-style chunk line from {base_x},{base_z}")
-        await send_console("forceload remove all", timeout=6)
     elif kind == "explode":
-        for n in range(random.randint(4, 10)):
-            x = base_x + random.randint(-20, 20)
-            z = base_z + random.randint(-20, 20)
+        await stress_load_area(base_x, base_z, 48)
+        for _n in range(random.randint(6, 12)):
+            x = base_x + random.randint(0, 40)
+            z = base_z + random.randint(0, 40)
             await send_console(
-                f"summon minecraft:tnt {x} {y} {z} {{Fuse:{random.randint(10, 30)}}}",
+                f"summon minecraft:tnt {x} {y} {z} {{Fuse:{random.randint(15, 40)}}}",
                 timeout=4,
             )
         notes.append(f"explosions at {base_x},{base_z}")
     elif kind == "village":
-        for n in range(random.randint(6, 12)):
-            x = base_x + n * 2
+        await stress_load_area(base_x, base_z, 32)
+        for n in range(random.randint(8, 14)):
             await send_console(
-                f"summon minecraft:villager {x} {y} {base_z} "
-                '{VillagerData:{profession:"minecraft:farmer",level:3,type:"minecraft:plains"}}',
+                f"summon minecraft:villager {base_x + n} {y} {base_z}",
                 timeout=4,
             )
         await send_console(f"summon minecraft:iron_golem {base_x} {y} {base_z}", timeout=4)
-        await send_console(f"summon minecraft:zombie {base_x + 8} {y} {base_z}", timeout=4)
+        await send_console(f"summon minecraft:zombie {base_x + 6} {y} {base_z}", timeout=4)
         notes.append(f"villagers and a raid at {base_x},{base_z}")
     else:
-        for n in range(random.randint(8, 20)):
-            x = base_x + random.randint(-12, 12)
-            z = base_z + random.randint(-12, 12)
+        await stress_load_area(base_x, base_z, 32)
+        for _n in range(random.randint(10, 24)):
+            x = base_x + random.randint(0, 24)
+            z = base_z + random.randint(0, 24)
             mob = random.choice(("zombie", "skeleton", "creeper"))
             await send_console(f"summon minecraft:{mob} {x} {y} {z}", timeout=4)
         notes.append(f"mob horde at {base_x},{base_z}")
@@ -7489,10 +7500,7 @@ async def stresstest(interaction: discord.Interaction, minutes: typing.Optional[
             except OSError:
                 pass
             left = max(0, int(deadline - time.monotonic()))
-            graph = discord.File(
-                io.BytesIO(stress_graph(tps_points, ping_points)),
-                filename="stress.png",
-            )
+            png = stress_graph(tps_points, ping_points)
             embed = panel(
                 "Stress test",
                 [f"{left // 60}m {left % 60}s left", "Green is TPS, blue is ping.", *lines],
@@ -7500,15 +7508,23 @@ async def stresstest(interaction: discord.Interaction, minutes: typing.Optional[
             )
             embed.set_image(url="attachment://stress.png")
             try:
-                await message.edit(embed=embed, attachments=[graph], view=view)
+                await message.edit(
+                    embed=embed,
+                    attachments=[discord.File(io.BytesIO(png), filename="stress.png")],
+                    view=view,
+                )
             except EDIT_ERRORS:
-                old = message
+                old_message = message
                 try:
-                    await old.edit(view=None)
+                    await old_message.edit(view=None)
                 except EDIT_ERRORS:
                     pass
                 try:
-                    message = await interaction.channel.send(embed=embed, file=graph, view=view)
+                    message = await interaction.channel.send(
+                        embed=embed,
+                        file=discord.File(io.BytesIO(png), filename="stress.png"),
+                        view=view,
+                    )
                     status.message = message
                     bot.add_view(view, message_id=message.id)
                 except EDIT_ERRORS:
