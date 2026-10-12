@@ -5508,15 +5508,18 @@ async def chat_start(player):
 
     await run_text_start(player, say_game)
 
-
 @bot.event
 async def on_message(message):
-    if message.author.bot or message.guild is None:
+
+    if (message.author.bot and message.webhook_id is None) or message.guild is None:
         return
+
     if GUILD_ID and message.guild.id != GUILD_ID:
         return
+
     if (message.content or "").strip().lower() != "!start":
         return
+
     who = message.author.display_name
 
     async def reply(text):
