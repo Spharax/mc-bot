@@ -6763,18 +6763,17 @@ async def tps_sample_loop():
                 labels, values = result
                 names = [part.strip() for part in labels.split(",")]
                 nums = [part.strip() for part in values.split(",")]
+                def tps_number(raw):
+                    # Paper prefixes a bad reading with *, so "*19.5" must still parse.
+                    match = re.search(r"[0-9]+(?:\.[0-9]+)?", raw or "")
+                    return float(match.group(0)) if match else None
+
                 for name, raw in zip(names, nums):
                     if name.strip() in ("1m", "1"):
-                        try:
-                            value = float(raw.split()[0])
-                        except ValueError:
-                            value = None
+                        value = tps_number(raw)
                         break
                 if value is None and nums:
-                    try:
-                        value = float(nums[0].split()[0])
-                    except ValueError:
-                        value = None
+                    value = tps_number(nums[0])
             TPS_HISTORY.append((time.time(), value))
         except Exception:
             TPS_HISTORY.append((time.time(), None))
@@ -6925,8 +6924,10 @@ def find_quiet_columns(limit=8, avoid=()):
         spawn_x = spawn_z = 0
     avoid = ((spawn_x, spawn_z),) + tuple(avoid)
     found = []
-    for name in sorted(os.listdir(region_dir)):
-        if not name.endswith(".mca") or len(found) >= limit:
+    names = [name for name in sorted(os.listdir(region_dir)) if name.endswith(".mca")]
+    # Far regions are the quiet ones. Cap the scan so a huge world cannot stall the test.
+    for name in names[:40]:
+        if len(found) >= limit:
             break
         path = os.path.join(region_dir, name)
         try:
@@ -6956,9 +6957,30 @@ def find_quiet_columns(limit=8, avoid=()):
     return found
 
 
+SAFE_SKIP = {
+    "minecraft:air", "minecraft:cave_air", "minecraft:void_air",
+    "minecraft:water", "minecraft:lava", "minecraft:bedrock",
+    "minecraft:chest", "minecraft:trapped_chest", "minecraft:barrel",
+    "minecraft:spawner", "minecraft:end_portal", "minecraft:end_portal_frame",
+    "minecraft:nether_portal", "minecraft:end_gateway",
+}
+
+
+def safe_block(name):
+    name = name if ":" in name else f"minecraft:{name}"
+    if name in SAFE_SKIP or name.endswith("_chest") or name.endswith("_door") or name.endswith("_bed"):
+        return None
+    return name
+
+
 async def restore_blocks(placed):
+    left = []
     for x, y, z, original in placed:
-        await send_console(f"setblock {x} {y} {z} {original}", timeout=4)
+        ok, _out = await send_console(f"setblock {x} {y} {z} {original}", timeout=4)
+        if not ok:
+            left.append((x, y, z, original))
+    placed[:] = left
+    return left
 
 
 async def stress_world_burst(placed):
@@ -6978,9 +7000,14 @@ async def stress_world_burst(placed):
     random.shuffle(columns)
     notes = []
     for x, y, z, root, original in columns[:random.randint(1, 3)]:
-        if original in ("minecraft:air", "minecraft:cave_air", "minecraft:void_air"):
+        original = safe_block(original)
+        above = safe_block(block_name_at(root, x, y + 1, z))
+        if original is None:
             continue
-        await send_console(f"setblock {x} {y} {z} minecraft:cobblestone", timeout=4)
+        ok, _out = await send_console(f"setblock {x} {y} {z} minecraft:cobblestone", timeout=4)
+        if not ok:
+            notes.append(f"place failed {x},{y},{z}")
+            continue
         placed.append((x, y, z, original))
         notes.append(f"placed {x},{y},{z}")
         await asyncio.sleep(random.uniform(0.4, 1.5))
@@ -6990,7 +7017,8 @@ async def stress_world_burst(placed):
     # Hostile mobs only in real darkness (block light 0 and sky light 0), then removed.
     for x, y, z, root, _original in columns:
         block_light, sky_light = light_at(root, x, y + 1, z)
-        if block_light != 0 or sky_light != 0:
+        above = block_name_at(root, x, y + 1, z)
+        if block_light != 0 or sky_light != 0 or above not in ("minecraft:air", "minecraft:cave_air", "air", "cave_air"):
             continue
         if random.random() < 0.5:
             continue
@@ -7134,14 +7162,19 @@ async def stresstest(interaction: discord.Interaction, minutes: typing.Optional[
     stop_event = asyncio.Event()
     view = StressView(stop_event)
     placed = []
+    message = None
     await interaction.response.defer(ephemeral=False)
-    # A channel message stays editable past 15 minutes. A followup webhook does not.
-    message = await interaction.channel.send(
-        embed=panel("Stress test", [f"Starting a {minutes} min randomised load."], COLOR_WAIT),
-        view=view,
-    )
-    bot.add_view(view, message_id=message.id)
-    await interaction.followup.send(f"Stress test panel: {message.jump_url}", ephemeral=False)
+    try:
+        # A channel message stays editable past 15 minutes. A followup webhook does not.
+        message = await interaction.channel.send(
+            embed=panel("Stress test", [f"Starting a {minutes} min randomised load."], COLOR_WAIT),
+            view=view,
+        )
+        bot.add_view(view, message_id=message.id)
+        await interaction.followup.send(f"Stress test panel: {message.jump_url}", ephemeral=False)
+    except Exception:
+        _stress_running = False
+        raise
     log_path = os.path.join(BOT_LOG_DIR, "stresstest.log")
     deadline = time.monotonic() + minutes * 60
     try:
@@ -7157,11 +7190,16 @@ async def stresstest(interaction: discord.Interaction, minutes: typing.Optional[
             except Exception as error:
                 log.warning("stress cycle failed: %s", error)
                 health, net, world_note = [f"cycle error: {error}"], [], ""
-            lines = health + ([world_note] if world_note else []) + net
+            lines = health + ([world_note] if world_note else []) + list(net)
+            # Discord embed descriptions die at 4096 characters.
+            body = "\n".join(str(line) for line in lines)
+            if len(body) > 3500:
+                lines = lines[:12] + ["…truncated"]
             stamp = time.strftime("%Y-%m-%d %H:%M:%S")
             try:
+                os.makedirs(os.path.dirname(log_path) or ".", exist_ok=True)
                 with open(log_path, "a", encoding="utf-8") as file:
-                    file.write(stamp + " | " + " | ".join(lines) + "\n")
+                    file.write(stamp + " | " + " | ".join(str(line) for line in lines) + "\n")
             except OSError:
                 pass
             left = max(0, int(deadline - time.monotonic()))
@@ -7181,14 +7219,19 @@ async def stresstest(interaction: discord.Interaction, minutes: typing.Optional[
             except asyncio.TimeoutError:
                 pass
     finally:
-        await restore_blocks(placed)
+        left = await restore_blocks(placed)
         await send_console('kill @e[tag=stresstest]', timeout=4)
         _stress_running = False
+        done = [f"Log: `{log_path}`"]
+        if left:
+            done.append(f"{len(left)} blocks could not be restored. Check the log.")
+            log.warning("stress restore left %s blocks", left)
         try:
-            await message.edit(
-                embed=panel("Stress test finished", [f"Log: `{log_path}`"], COLOR_OK),
-                view=None,
-            )
+            if message is not None:
+                await message.edit(
+                    embed=panel("Stress test finished", done, COLOR_OK if not left else COLOR_BAD),
+                    view=None,
+                )
         except EDIT_ERRORS:
             pass
 
