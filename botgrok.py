@@ -3308,6 +3308,11 @@ async def run_idle_shutdown():
 async def idle_tick():
     """One idle-shutdown step. Called only while the server is up and idle."""
 
+    if _stress_running:
+        if idle.since is not None:
+            await cancel_idle_shutdown("A stress test is running.")
+        return
+
     count = await get_player_count()
     now = time.monotonic()
 
