@@ -256,6 +256,8 @@ def warn_throttled(key, message, *args, every=300):
 # CONFIG
 # ============================================================
 
+VERSION = "1.00"
+
 TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = env_int("DISCORD_GUILD_ID", 0)
 ADMIN_ROLE_ID = env_int("MC_ADMIN_ROLE_ID", 0)
@@ -764,7 +766,8 @@ def install_loop_handlers(loop):
 
 def log_startup_banner():
     log.info(
-        "Starting MC bot (python %s, discord.py %s)",
+        "Starting MC bot %s (python %s, discord.py %s)",
+        VERSION,
         sys.version.split()[0],
         discord.__version__,
     )
@@ -4078,7 +4081,7 @@ COMMANDS = (
 
 def online_embed():
     embed = discord.Embed(
-        title="Bot online",
+        title=f"Bot online {VERSION}",
         description="The bot is up. The Minecraft server was left as it was.",
         color=0x8B5A2B,
     )
