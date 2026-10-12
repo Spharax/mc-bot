@@ -256,7 +256,7 @@ def warn_throttled(key, message, *args, every=300):
 # CONFIG
 # ============================================================
 
-VERSION = "1.12"
+VERSION = "1.13"
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = env_int("DISCORD_GUILD_ID", 0)
@@ -5256,12 +5256,16 @@ def _packet(packet_id, payload):
 
 
 def offline_status_packet():
-    """Answer a server-list refresh without starting anything."""
+    """Answer a server-list refresh without starting anything.
+
+    Protocol 777 is Paper 26.3. A -1 protocol makes the client mark the
+    server incompatible and it may never send the login packet.
+    """
 
     body = json.dumps({
-        "version": {"name": "offline", "protocol": -1},
-        "players": {"max": 0, "online": 0, "sample": []},
-        "description": {"text": "Server is offline."},
+        "version": {"name": "26.3", "protocol": 777},
+        "players": {"max": 20, "online": 0, "sample": []},
+        "description": {"text": "Offline. Joining will start the server."},
     })
     return _packet(0x00, _mc_string(body))
 
@@ -5348,18 +5352,20 @@ async def handle_wake(reader, writer):
     who = peer[0] if peer else "unknown"
     try:
         raw, intent = await asyncio.wait_for(handshake_intent(reader), timeout=15)
-    except (OSError, asyncio.TimeoutError, asyncio.IncompleteReadError, ValueError, IndexError):
+    except (OSError, asyncio.TimeoutError, asyncio.IncompleteReadError, ValueError, IndexError) as error:
+        log.warning("Wake: bad handshake from %s: %s", who, error)
         writer.close()
         return
+    log.info("Wake: %s sent intent %s", who, intent)
     if intent not in (2, 3):
         try:
             writer.write(offline_status_packet())
             await writer.drain()
-        except OSError:
-            pass
+        except OSError as error:
+            log.warning("Wake: status reply to %s failed: %s", who, error)
         writer.close()
         return
-    # A real join. Hold this connection and hand it to Paper once it is up.
+    log.info("Wake: login from %s, starting the server", who)
     spawn(hold_join(reader, writer, raw, who))
 
 
