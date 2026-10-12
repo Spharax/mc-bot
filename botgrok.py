@@ -256,7 +256,7 @@ def warn_throttled(key, message, *args, every=300):
 # CONFIG
 # ============================================================
 
-VERSION = "1.13"
+VERSION = "1.20"
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = env_int("DISCORD_GUILD_ID", 0)
@@ -7195,6 +7195,206 @@ STRESS_WARN = "Long duration validation test underway. Changes you make will NOT
 STRESS_MAX_MINUTES = 300  # 5 hours
 
 
+def stress_graph(tps_points, ping_points):
+    """One image: TPS on the left scale, ping on the right."""
+
+    width, height = 640, 220
+    pixels = bytearray(bytes((16, 18, 22)) * (width * height))
+
+    def put(x, y, color):
+        if 0 <= x < width and 0 <= y < height:
+            i = (y * width + x) * 3
+            pixels[i:i + 3] = bytes(color)
+
+    left, right, top, bottom = 36, width - 28, 16, height - 24
+    for y in range(top, bottom):
+        put(left, y, (50, 54, 60))
+        put(right, y, (50, 54, 60))
+    for x in range(left, right):
+        put(x, bottom, (50, 54, 60))
+        if (x - left) % 80 == 0:
+            put(x, bottom + 2, (80, 84, 90))
+    for mark, label_y in ((20, top), (10, (top + bottom) // 2)):
+        y = bottom - int(mark / 20 * (bottom - top))
+        for x in range(left, right, 6):
+            put(x, y, (36, 40, 46))
+
+    def series(points, scale, color):
+        usable = [(stamp, value) for stamp, value in points if value is not None]
+        if len(usable) < 2:
+            return
+        span = max(1.0, usable[-1][0] - usable[0][0])
+        prev = None
+        for stamp, value in usable:
+            x = left + int((stamp - usable[0][0]) / span * (right - left - 1))
+            y = bottom - int(max(0, min(scale, value)) / scale * (bottom - top))
+            if prev:
+                x0, y0 = prev
+                steps = max(abs(x - x0), abs(y - y0), 1)
+                for step in range(steps + 1):
+                    put(x0 + (x - x0) * step // steps, y0 + (y - y0) * step // steps, color)
+            put(x, y, color)
+            prev = (x, y)
+
+    series(tps_points, 20, (80, 200, 120))
+    pings = [value for _stamp, value in ping_points if value is not None]
+    ping_scale = max(50, max(pings) if pings else 50)
+    series(ping_points, ping_scale, (90, 160, 230))
+    return png_bytes(width, height, pixels)
+
+
+class PanelStatus:
+    """Lets wait_for_state update the stress panel."""
+
+    def __init__(self, message, view):
+        self.message = message
+        self.view = view
+
+    async def set(self, text, force=False):
+        try:
+            await self.message.edit(
+                embed=panel("Stress test", [text], COLOR_WAIT),
+                view=self.view,
+            )
+        except EDIT_ERRORS:
+            log.info("stress: %s", text)
+
+
+async def stress_stop_server(status):
+    if not await server_running(force=True):
+        return True
+    await save_world()
+    t0 = time.monotonic()
+    if not await send_stop():
+        await status.set("Could not send stop.")
+        return False
+    return await wait_for_state(
+        status, False, t0,
+        "Stopping the server...",
+        "Server stopped.",
+        "Server did not stop.",
+    )
+
+
+async def stress_start_server(status):
+    await asyncio.sleep(PORT_WAIT)
+    cursor = LogCursor()
+    launch = await launch_server()
+    return await wait_for_ready(
+        status, time.monotonic(), cursor, launch,
+        "Starting the server...",
+        "Server is ready.",
+        "Server did not finish starting.",
+    )
+
+
+async def stress_snapshot(status):
+    """Stop, copy the worlds, start again. Returns the backup folder or None."""
+
+    await status.set("Saving the world before the snapshot.")
+    if not await stress_stop_server(status):
+        return None
+    await status.set("Copying the worlds.")
+    code, tail, folder = await perform_backup("manual")
+    if code != 0 or not folder:
+        await status.set(f"Backup failed: {tail[:200]!r}")
+        await stress_start_server(status)
+        return None
+    if not await stress_start_server(status):
+        return None
+    return folder
+
+
+async def stress_restore_world(status, folder):
+    """Stop, put the snapshot back, start again."""
+
+    if not await stress_stop_server(status):
+        return False
+    await status.set("Restoring the pre-test world.")
+    try:
+        copied = await asyncio.to_thread(restore_backup_folder, folder)
+    except Exception as error:
+        log.exception("stress restore failed")
+        await status.set(f"Restore failed: {error}")
+        await stress_start_server(status)
+        return False
+    log.info("Stress restore replaced: %s", ", ".join(copied))
+    return await stress_start_server(status)
+
+
+async def stress_heavy_burst():
+    """One destructive burst. The world is restored from the snapshot afterwards."""
+
+    base_x = random.randint(-2000, 2000)
+    base_z = random.randint(-2000, 2000)
+    y = random.randint(70, 110)
+    notes = []
+    kind = random.choice(("place", "chunks", "elytra", "explode", "village", "mobs"))
+    if kind == "place":
+        for n in range(4):
+            x = base_x + n * 24
+            z = base_z + n * 18
+            await send_console(
+                f"fill {x} {y} {z} {x + 6} {y + 4} {z + 6} minecraft:cobblestone",
+                timeout=6,
+            )
+            await send_console(
+                f"fill {x} {y} {z} {x + 6} {y + 4} {z + 6} minecraft:air",
+                timeout=6,
+            )
+        notes.append(f"4 players placed and broke near {base_x},{base_z}")
+    elif kind == "chunks":
+        await send_console(
+            f"forceload add {base_x} {base_z} {base_x + 128} {base_z + 128}",
+            timeout=8,
+        )
+        notes.append(f"loaded a 128 block square at {base_x},{base_z}")
+        await asyncio.sleep(random.uniform(1, 3))
+        await send_console(
+            f"forceload remove {base_x} {base_z} {base_x + 128} {base_z + 128}",
+            timeout=6,
+        )
+    elif kind == "elytra":
+        # A fast flight loads a long line of new chunks.
+        dx, dz = random.choice(((48, 0), (-48, 0), (0, 48), (0, -48), (32, 32)))
+        x, z = base_x, base_z
+        for _ in range(random.randint(6, 12)):
+            await send_console(f"forceload add {x} {z} {x + 16} {z + 16}", timeout=4)
+            x += dx
+            z += dz
+            await asyncio.sleep(0.15)
+        notes.append(f"elytra-style chunk line from {base_x},{base_z}")
+        await send_console("forceload remove all", timeout=6)
+    elif kind == "explode":
+        for n in range(random.randint(4, 10)):
+            x = base_x + random.randint(-20, 20)
+            z = base_z + random.randint(-20, 20)
+            await send_console(
+                f"summon minecraft:tnt {x} {y} {z} {{Fuse:{random.randint(10, 30)}}}",
+                timeout=4,
+            )
+        notes.append(f"explosions at {base_x},{base_z}")
+    elif kind == "village":
+        for n in range(random.randint(6, 12)):
+            x = base_x + n * 2
+            await send_console(
+                f"summon minecraft:villager {x} {y} {base_z} "
+                '{VillagerData:{profession:"minecraft:farmer",level:3,type:"minecraft:plains"}}',
+                timeout=4,
+            )
+        await send_console(f"summon minecraft:iron_golem {base_x} {y} {base_z}", timeout=4)
+        await send_console(f"summon minecraft:zombie {base_x + 8} {y} {base_z}", timeout=4)
+        notes.append(f"villagers and a raid at {base_x},{base_z}")
+    else:
+        for n in range(random.randint(8, 20)):
+            x = base_x + random.randint(-12, 12)
+            z = base_z + random.randint(-12, 12)
+            mob = random.choice(("zombie", "skeleton", "creeper"))
+            await send_console(f"summon minecraft:{mob} {x} {y} {z}", timeout=4)
+        notes.append(f"mob horde at {base_x},{base_z}")
+    return ", ".join(notes) or kind
+
+
 async def stress_warn():
     """Red line in Minecraft chat. tellraw, because say cannot colour text."""
 
@@ -7234,29 +7434,50 @@ async def stresstest(interaction: discord.Interaction, minutes: typing.Optional[
         _stress_running = False
         raise
     log_path = os.path.join(BOT_LOG_DIR, "stresstest.log")
+    status = PanelStatus(message, view)
+    snapshot = await stress_snapshot(status)
+    if not snapshot:
+        _stress_running = False
+        view.stop()
+        try:
+            await message.edit(
+                embed=panel("Stress test aborted", ["The world was not changed."], COLOR_BAD),
+                view=None,
+            )
+        except EDIT_ERRORS:
+            pass
+        return
     deadline = time.monotonic() + minutes * 60
     next_warn = 0.0
-    ok, _out = await send_console("save-off", timeout=4)
-    if ok:
-        mark_autosave_off()
+    tps_points, ping_points = [], []
+    await stress_warn()
     try:
         while time.monotonic() < deadline and not stop_event.is_set():
             if time.monotonic() >= next_warn:
                 await stress_warn()
                 next_warn = time.monotonic() + 120
             try:
-                if random.random() < 0.65:
-                    world_note = await stress_world_burst(placed)
-                else:
-                    world_note = "idle gap"
-                    await asyncio.sleep(random.uniform(2, 6))
+                world_note = await stress_heavy_burst()
                 health = await health_snapshot()
                 net = list(await network_burst())
             except Exception as error:
                 log.warning("stress cycle failed: %s", error)
                 health, net, world_note = [f"cycle error: {error}"], [], ""
+            tps_value = None
+            for line in health:
+                if str(line).startswith("TPS:"):
+                    match = re.search(r"[0-9]+(?:\.[0-9]+)?", str(line))
+                    tps_value = float(match.group(0)) if match else None
+            ping_value = None
+            for line in net:
+                match = re.search(r"avg ([0-9]+)", str(line))
+                if match:
+                    ping_value = float(match.group(1))
+                    break
+            now = time.time()
+            tps_points.append((now, tps_value))
+            ping_points.append((now, ping_value))
             lines = health + ([world_note] if world_note else []) + list(net)
-            # Discord embed descriptions die at 4096 characters.
             body = "\n".join(str(line) for line in lines)
             if len(body) > 3500:
                 lines = lines[:12] + ["…truncated"]
@@ -7268,35 +7489,58 @@ async def stresstest(interaction: discord.Interaction, minutes: typing.Optional[
             except OSError:
                 pass
             left = max(0, int(deadline - time.monotonic()))
+            graph = discord.File(
+                io.BytesIO(stress_graph(tps_points, ping_points)),
+                filename="stress.png",
+            )
+            embed = panel(
+                "Stress test",
+                [f"{left // 60}m {left % 60}s left", "Green is TPS, blue is ping.", *lines],
+                COLOR_WAIT,
+            )
+            embed.set_image(url="attachment://stress.png")
             try:
-                await message.edit(
-                    embed=panel(
-                        "Stress test",
-                        [f"{left // 60}m {left % 60}s left", *lines],
-                        COLOR_WAIT,
-                    ),
-                    view=view,
-                )
+                await message.edit(embed=embed, attachments=[graph], view=view)
             except EDIT_ERRORS:
-                pass
+                old = message
+                try:
+                    await old.edit(view=None)
+                except EDIT_ERRORS:
+                    pass
+                try:
+                    message = await interaction.channel.send(embed=embed, file=graph, view=view)
+                    status.message = message
+                    bot.add_view(view, message_id=message.id)
+                except EDIT_ERRORS:
+                    pass
             try:
-                await asyncio.wait_for(stop_event.wait(), timeout=random.uniform(8, 15))
+                await asyncio.wait_for(stop_event.wait(), timeout=random.uniform(4, 8))
             except asyncio.TimeoutError:
                 pass
     finally:
-        left = await restore_blocks(placed)
-        await send_console('kill @e[tag=stresstest]', timeout=4)
-        await restore_autosave()
+        await send_console("forceload remove all", timeout=6)
+        await send_console("kill @e[type=tnt]", timeout=4)
+        await send_console("kill @e[type=villager]", timeout=4)
+        await send_console("kill @e[type=iron_golem]", timeout=4)
+        await send_console("kill @e[type=zombie]", timeout=4)
+        await send_console("kill @e[type=skeleton]", timeout=4)
+        await send_console("kill @e[type=creeper]", timeout=4)
+        restored = await stress_restore_world(status, snapshot)
         _stress_running = False
         view.stop()
-        done = [f"Log: `{log_path}`"]
-        if left:
-            done.append(f"{len(left)} blocks could not be restored. Check the log.")
-            log.warning("stress restore left %s blocks", left)
+        done = [
+            f"Snapshot: `{os.path.basename(snapshot)}`",
+            "World restored." if restored else "Restore failed. The snapshot is still in the backup folder.",
+            f"Log: `{log_path}`",
+        ]
         try:
             if message is not None:
                 await message.edit(
-                    embed=panel("Stress test finished", done, COLOR_OK if not left else COLOR_BAD),
+                    embed=panel(
+                        "Stress test finished",
+                        done,
+                        COLOR_OK if restored else COLOR_BAD,
+                    ),
                     view=None,
                 )
         except EDIT_ERRORS:
