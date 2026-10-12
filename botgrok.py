@@ -9479,7 +9479,26 @@ async def run_bot_forever():
         last_signature = network_signature()
 
 
-def _git(args, timeout=30):
+UPDATE_LOG = os.path.join(BOT_LOG_DIR, "update.log")
+GIT_TIMEOUT = 45
+COMPILE_TIMEOUT = 20
+
+
+def update_log(message):
+    """Print and append. This runs before the normal logger exists."""
+
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    line = f"{stamp} {message}"
+    print(line, flush=True)
+    try:
+        os.makedirs(BOT_LOG_DIR, exist_ok=True)
+        with open(UPDATE_LOG, "a", encoding="utf-8") as file:
+            file.write(line + "\n")
+    except OSError as error:
+        print(f"{stamp} could not write {UPDATE_LOG}: {error}", flush=True)
+
+
+def _git(args, timeout=GIT_TIMEOUT):
     return subprocess.run(
         ["git", *args], cwd=BASE_DIR, timeout=timeout,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
@@ -9496,39 +9515,61 @@ def update_from_github():
     """
 
     if not os.path.isdir(os.path.join(BASE_DIR, ".git")):
-        print("Not a git checkout. Skipping GitHub update.", flush=True)
+        update_log("Not a git checkout. Skipping GitHub update.")
         return
     try:
-        fetched = _git(["fetch", "origin", "main"], timeout=60)
-        local = _git(["rev-parse", "HEAD"])
-        remote = _git(["rev-parse", "origin/main"])
-    except (OSError, subprocess.TimeoutExpired) as error:
-        print(f"GitHub check skipped: {error}", flush=True)
+        fetched = _git(["fetch", "origin", "main"], timeout=GIT_TIMEOUT)
+        local = _git(["rev-parse", "HEAD"], timeout=10)
+        remote = _git(["rev-parse", "origin/main"], timeout=10)
+    except subprocess.TimeoutExpired as error:
+        update_log(f"GitHub check timed out after {error.timeout}s ({error.cmd})")
+        return
+    except OSError as error:
+        update_log(f"GitHub check failed: {error}")
         return
     if fetched.returncode != 0 or local.returncode != 0 or remote.returncode != 0:
-        print(f"GitHub check failed:\n{fetched.stdout}{local.stdout}{remote.stdout}", flush=True)
+        update_log(
+            "GitHub check failed "
+            f"(fetch={fetched.returncode}, local={local.returncode}, remote={remote.returncode})\n"
+            f"{fetched.stdout}{local.stdout}{remote.stdout}".rstrip()
+        )
         return
     if local.stdout.strip() == remote.stdout.strip():
-        print("GitHub is current. No update.", flush=True)
+        update_log(f"GitHub is current ({local.stdout.strip()[:8]}).")
         return
-    print(f"Update found ({local.stdout.strip()[:8]} -> {remote.stdout.strip()[:8]}). Downloading.", flush=True)
+    update_log(f"Update found ({local.stdout.strip()[:8]} -> {remote.stdout.strip()[:8]}). Downloading.")
     try:
-        pulled = _git(["pull", "--ff-only", "origin", "main"], timeout=60)
-        now = _git(["rev-parse", "HEAD"])
-    except (OSError, subprocess.TimeoutExpired) as error:
-        print(f"Download failed: {error}", flush=True)
+        pulled = _git(["pull", "--ff-only", "origin", "main"], timeout=GIT_TIMEOUT)
+        now = _git(["rev-parse", "HEAD"], timeout=10)
+    except subprocess.TimeoutExpired as error:
+        update_log(f"Download timed out after {error.timeout}s. Not restarting.")
+        return
+    except OSError as error:
+        update_log(f"Download failed: {error}")
         return
     if pulled.returncode != 0 or now.stdout.strip() != remote.stdout.strip():
-        print(f"Download did not match origin/main. Not restarting.\n{pulled.stdout}", flush=True)
+        update_log(
+            "Download did not match origin/main. Not restarting. "
+            f"pull={pulled.returncode} head={now.stdout.strip()[:8]} "
+            f"wanted={remote.stdout.strip()[:8]}\n{pulled.stdout}".rstrip()
+        )
         return
-    check = subprocess.run(
-        [sys.executable, "-m", "py_compile", os.path.join(BASE_DIR, "botgrok.py")],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-    )
+    try:
+        check = subprocess.run(
+            [sys.executable, "-m", "py_compile", os.path.join(BASE_DIR, "botgrok.py")],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            timeout=COMPILE_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        update_log(f"Compile check timed out after {COMPILE_TIMEOUT}s. Not restarting.")
+        return
+    except OSError as error:
+        update_log(f"Compile check failed: {error}")
+        return
     if check.returncode != 0:
-        print(f"Downloaded file does not compile. Not restarting.\n{check.stdout}", flush=True)
+        update_log(f"Downloaded file does not compile. Not restarting.\n{check.stdout}".rstrip())
         return
-    print("Download verified. Restarting onto the new code.", flush=True)
+    update_log(f"Download verified ({now.stdout.strip()[:8]}). Restarting onto the new code.")
     os._exit(1)
 
 
