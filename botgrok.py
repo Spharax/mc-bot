@@ -9479,41 +9479,57 @@ async def run_bot_forever():
         last_signature = network_signature()
 
 
-def pull_github():
-    """Pull main before the bot runs. Restart once if the code changed.
+def _git(args, timeout=30):
+    return subprocess.run(
+        ["git", *args], cwd=BASE_DIR, timeout=timeout,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
 
-    The running process is already the old file, so a pull only takes effect
-    after this exit. systemd starts it again, and that start is already current.
+
+def update_from_github():
+    """Check GitHub, download if newer, verify, then restart onto the new file.
+
+    1. fetch origin and compare HEAD to origin/main
+    2. if newer, pull it onto this checkout
+    3. confirm the local commit is origin/main and the file compiles
+    4. exit so systemd starts the new code
     """
 
     if not os.path.isdir(os.path.join(BASE_DIR, ".git")):
         print("Not a git checkout. Skipping GitHub update.", flush=True)
         return
-    def head():
-        return subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=BASE_DIR, stderr=subprocess.DEVNULL
-        ).strip()
     try:
-        before = head()
-        result = subprocess.run(
-            ["git", "pull", "--ff-only", "origin", "main"],
-            cwd=BASE_DIR, timeout=60,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-        )
+        fetched = _git(["fetch", "origin", "main"], timeout=60)
+        local = _git(["rev-parse", "HEAD"])
+        remote = _git(["rev-parse", "origin/main"])
     except (OSError, subprocess.TimeoutExpired) as error:
-        print(f"GitHub update skipped: {error}", flush=True)
+        print(f"GitHub check skipped: {error}", flush=True)
         return
-    if result.returncode != 0:
-        print(f"GitHub update failed:\n{result.stdout}", flush=True)
+    if fetched.returncode != 0 or local.returncode != 0 or remote.returncode != 0:
+        print(f"GitHub check failed:\n{fetched.stdout}{local.stdout}{remote.stdout}", flush=True)
         return
+    if local.stdout.strip() == remote.stdout.strip():
+        print("GitHub is current. No update.", flush=True)
+        return
+    print(f"Update found ({local.stdout.strip()[:8]} -> {remote.stdout.strip()[:8]}). Downloading.", flush=True)
     try:
-        changed = head() != before
-    except OSError:
-        changed = False
-    print(result.stdout.strip() or "GitHub check done.", flush=True)
-    if changed:
-        print("Updated from GitHub. Restarting so the new code runs.", flush=True)
-        os._exit(1)
+        pulled = _git(["pull", "--ff-only", "origin", "main"], timeout=60)
+        now = _git(["rev-parse", "HEAD"])
+    except (OSError, subprocess.TimeoutExpired) as error:
+        print(f"Download failed: {error}", flush=True)
+        return
+    if pulled.returncode != 0 or now.stdout.strip() != remote.stdout.strip():
+        print(f"Download did not match origin/main. Not restarting.\n{pulled.stdout}", flush=True)
+        return
+    check = subprocess.run(
+        [sys.executable, "-m", "py_compile", os.path.join(BASE_DIR, "botgrok.py")],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    if check.returncode != 0:
+        print(f"Downloaded file does not compile. Not restarting.\n{check.stdout}", flush=True)
+        return
+    print("Download verified. Restarting onto the new code.", flush=True)
+    os._exit(1)
 
 
 def main():
@@ -9521,7 +9537,7 @@ def main():
         raise SystemExit(
             f"DISCORD_TOKEN is missing from {os.path.join(BASE_DIR, '.env')}"
         )
-    pull_github()
+    update_from_github()
     _lock = acquire_instance_lock()  # noqa: F841
     try:
         asyncio.run(run_bot_forever())
