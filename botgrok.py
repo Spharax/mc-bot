@@ -8405,8 +8405,8 @@ async def botreset(interaction: discord.Interaction):
         return
     view = BotResetView()
     await interaction.response.send_message(
-        "**Reset the bot?**\nIt goes offline, then systemd starts it again. "
-        "The Minecraft server is not stopped.",
+        "**Reset the bot?**\nIt goes offline, pulls the latest code from GitHub, "
+        "then systemd starts it again. The Minecraft server is not stopped.",
         view=view,
         ephemeral=False,
     )
@@ -9479,11 +9479,49 @@ async def run_bot_forever():
         last_signature = network_signature()
 
 
+def pull_github():
+    """Pull main before the bot runs. Restart once if the code changed.
+
+    The running process is already the old file, so a pull only takes effect
+    after this exit. systemd starts it again, and that start is already current.
+    """
+
+    if not os.path.isdir(os.path.join(BASE_DIR, ".git")):
+        print("Not a git checkout. Skipping GitHub update.", flush=True)
+        return
+    def head():
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=BASE_DIR, stderr=subprocess.DEVNULL
+        ).strip()
+    try:
+        before = head()
+        result = subprocess.run(
+            ["git", "pull", "--ff-only", "origin", "main"],
+            cwd=BASE_DIR, timeout=60,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        print(f"GitHub update skipped: {error}", flush=True)
+        return
+    if result.returncode != 0:
+        print(f"GitHub update failed:\n{result.stdout}", flush=True)
+        return
+    try:
+        changed = head() != before
+    except OSError:
+        changed = False
+    print(result.stdout.strip() or "GitHub check done.", flush=True)
+    if changed:
+        print("Updated from GitHub. Restarting so the new code runs.", flush=True)
+        os._exit(1)
+
+
 def main():
     if not TOKEN:
         raise SystemExit(
             f"DISCORD_TOKEN is missing from {os.path.join(BASE_DIR, '.env')}"
         )
+    pull_github()
     _lock = acquire_instance_lock()  # noqa: F841
     try:
         asyncio.run(run_bot_forever())
