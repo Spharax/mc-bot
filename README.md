@@ -8,6 +8,7 @@ It starts and stops the server, takes backups, relays logs, draws an on-demand m
 
 1. Copy `.env.example` if you have one, or create `.env` next to `botgrok.py`.
 2. Set `DISCORD_TOKEN` and the channel and role IDs.
-3. Run `python3 botgrok.py`, or use the systemd unit.
+3. Run `python botgrok.py`,or 'python3 botgrok,py' or use the systemd unit.
 
 Do not commit `.env`. It holds the bot token and the RCON password.
+ig das ist it 
