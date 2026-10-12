@@ -124,6 +124,7 @@ Requires Python 3.9+ (asyncio.to_thread).
 
 import asyncio
 import collections
+import random
 import difflib
 import functools
 import gzip
@@ -682,6 +683,7 @@ class MCServerBot(discord.Client):
         log_startup_notes()
         log_props_note()
         spawn(startup_rcon_check())
+        spawn(tps_sample_loop())
         spawn(warn_server_dir_mismatch())
         spawn(recover_interrupted_backup())
         if CHAT_BACKUP:
@@ -4048,7 +4050,7 @@ COMMANDS = (
     "/save  save the world\n"
     "/health  TPS, RAM, CPU, disk\n"
     "/players  who is online\n"
-    "/tps  TPS and MSPT\n"
+    "/tps  TPS and MSPT, 5-minute graph\n"
     "/ping  ping an IP or a player\n"
     "/pingall  ping everyone online\n"
     "/backup make  back up now\n"
@@ -4056,6 +4058,8 @@ COMMANDS = (
     "/backup restore  restore a backup\n"
     "/say  send a line to Minecraft chat\n"
     "/log  log one system for 20 minutes\n"
+    "/log tps  longer TPS graph\n"
+    "/stresstest  4-player load, network, health log\n"
     "/stats  health, hunger, inventory\n"
     "/map  top-down map\n"
     "/console  live console\n"
@@ -5508,18 +5512,15 @@ async def chat_start(player):
 
     await run_text_start(player, say_game)
 
+
 @bot.event
 async def on_message(message):
-
-    if (message.author.bot and message.webhook_id is None) or message.guild is None:
+    if message.author.bot or message.guild is None:
         return
-
     if GUILD_ID and message.guild.id != GUILD_ID:
         return
-
     if (message.content or "").strip().lower() != "!start":
         return
-
     who = message.author.display_name
 
     async def reply(text):
@@ -6744,6 +6745,454 @@ async def world_map(
         _map_running = False
 
 
+
+# ============================================================
+# TPS HISTORY + GRAPH
+# ============================================================
+
+TPS_HISTORY = collections.deque(maxlen=1440)  # 6 hours at 15s
+_tps_graph_running = False
+
+
+async def tps_sample_loop():
+    while True:
+        try:
+            result = await get_tps()
+            value = None
+            if result:
+                labels, values = result
+                names = [part.strip() for part in labels.split(",")]
+                nums = [part.strip() for part in values.split(",")]
+                for name, raw in zip(names, nums):
+                    if name.strip() in ("1m", "1"):
+                        try:
+                            value = float(raw.split()[0])
+                        except ValueError:
+                            value = None
+                        break
+                if value is None and nums:
+                    try:
+                        value = float(nums[0].split()[0])
+                    except ValueError:
+                        value = None
+            TPS_HISTORY.append((time.time(), value))
+        except Exception:
+            TPS_HISTORY.append((time.time(), None))
+        await asyncio.sleep(15)
+
+
+async def tps_graph_follow(message, seconds):
+    global _tps_graph_running
+    deadline = time.monotonic() + seconds
+    try:
+        while time.monotonic() < deadline:
+            await asyncio.sleep(30)
+            try:
+                lines = await tps_mspt_lines()
+                chart = tps_chart(seconds, "TPS")
+                left = max(0, int(deadline - time.monotonic()))
+                await message.edit(
+                    embed=panel(f"TPS, {left // 60}m {left % 60}s left", lines, COLOR_INFO),
+                    attachments=[discord.File(io.BytesIO(chart), filename="tps.png")],
+                )
+            except EDIT_ERRORS:
+                return
+        try:
+            lines = await tps_mspt_lines()
+            await message.edit(
+                embed=panel("TPS, 5 minutes", lines, COLOR_OK),
+                attachments=[discord.File(io.BytesIO(tps_chart(seconds, "TPS")), filename="tps.png")],
+            )
+        except EDIT_ERRORS:
+            pass
+    finally:
+        _tps_graph_running = False
+
+
+def tps_chart(window, title):
+    """PNG of 1-minute TPS over the last `window` seconds."""
+
+    cutoff = time.time() - window
+    points = [(stamp, value) for stamp, value in TPS_HISTORY if stamp >= cutoff and value is not None]
+    width, height = 640, 240
+    pixels = bytearray([18, 22, 28]) * (width * height)
+
+    def put(x, y, color):
+        if 0 <= x < width and 0 <= y < height:
+            pos = (y * width + x) * 3
+            pixels[pos:pos + 3] = bytes(color)
+
+    left, right, top, bottom = 36, width - 8, 16, height - 28
+    for y in range(top, bottom):
+        put(left, y, (60, 70, 80))
+    for x in range(left, right):
+        put(x, bottom, (60, 70, 80))
+        if (20 - 0) and False:
+            pass
+    for mark in (0, 10, 20):
+        y = bottom - int((mark / 20) * (bottom - top))
+        for x in range(left, right, 4):
+            put(x, y, (40, 48, 58))
+    if len(points) >= 2:
+        span = max(1, points[-1][0] - points[0][0])
+        prev = None
+        for stamp, value in points:
+            x = left + int((stamp - points[0][0]) / span * (right - left - 1))
+            y = bottom - int(max(0, min(20, value)) / 20 * (bottom - top))
+            color = (80, 200, 120) if value >= 18 else (220, 160, 60) if value >= 15 else (220, 80, 80)
+            if prev:
+                x0, y0 = prev
+                steps = max(abs(x - x0), abs(y - y0), 1)
+                for step in range(steps + 1):
+                    put(x0 + (x - x0) * step // steps, y0 + (y - y0) * step // steps, color)
+            put(x, y, color)
+            prev = (x, y)
+    return png_bytes(width, height, pixels)
+
+
+# ============================================================
+# /STRESSTEST
+# ============================================================
+
+_stress_running = False
+INHABITED_LIMIT = 200  # ticks. About 10 seconds in a chunk counts as touched.
+
+
+def chunk_inhabited(root):
+    try:
+        return int(root.get("InhabitedTime", 0))
+    except (TypeError, ValueError):
+        return 10**9
+
+
+def _nibble(raw, x, y, z):
+    if not isinstance(raw, (bytes, bytearray)) or len(raw) < 2048:
+        return None
+    index = ((y & 15) << 8) | ((z & 15) << 4) | (x & 15)
+    byte = raw[index >> 1]
+    return (byte >> 4) & 15 if index & 1 else byte & 15
+
+
+def light_at(root, x, y, z):
+    """(block light, sky light). None if that array is missing.
+
+    Hostile mobs need both at 0. Surface sky light is 15 in daytime.
+    """
+
+    section_y = y >> 4
+    for section in root.get("sections") or root.get("Sections") or []:
+        if not isinstance(section, dict) or int(section.get("Y", 999)) != section_y:
+            continue
+        return _nibble(section.get("BlockLight"), x, y, z), _nibble(section.get("SkyLight"), x, y, z)
+    return None, None
+
+
+def block_name_at(root, x, y, z):
+    """Block id at a world position inside this chunk, or air."""
+
+    local = ((z & 15) << 4) | (x & 15)
+    section_y = y >> 4
+    for section in root.get("sections") or root.get("Sections") or []:
+        if not isinstance(section, dict) or int(section.get("Y", 999)) != section_y:
+            continue
+        states = section.get("block_states") or {}
+        names = [palette_name(entry) for entry in states.get("palette") or []]
+        data = states.get("data") or []
+        if not names:
+            return "minecraft:air"
+        if len(names) == 1 or not data:
+            return names[0]
+        bits = max(4, (len(names) - 1).bit_length())
+        per_long = 64 // bits
+        index = ((y & 15) << 8) | local
+        word = index // per_long
+        if word >= len(data):
+            return names[0]
+        value = (data[word] >> (index % per_long * bits)) & ((1 << bits) - 1)
+        return names[value] if value < len(names) else names[0]
+    return "minecraft:air"
+
+
+def find_quiet_columns(limit=8, avoid=()):
+    """Columns in chunks players have barely visited, away from spawn and anyone online."""
+
+    region_dir, base = region_dir_for("overworld")
+    if region_dir is None:
+        return []
+    try:
+        spawn_x, spawn_z = default_center()
+    except Exception:
+        spawn_x = spawn_z = 0
+    avoid = ((spawn_x, spawn_z),) + tuple(avoid)
+    found = []
+    for name in sorted(os.listdir(region_dir)):
+        if not name.endswith(".mca") or len(found) >= limit:
+            break
+        path = os.path.join(region_dir, name)
+        try:
+            with open(path, "rb") as file:
+                for index in range(1024):
+                    if len(found) >= limit:
+                        break
+                    root = read_chunk(file, index)
+                    if root is None or chunk_inhabited(root) > INHABITED_LIMIT:
+                        continue
+                    cx = int(root.get("xPos", 0))
+                    cz = int(root.get("zPos", 0))
+                    wx, wz = cx * 16 + 8, cz * 16 + 8
+                    if any(abs(wx - ax) < 256 and abs(wz - az) < 256 for ax, az in avoid):
+                        continue
+                    maps = root.get("Heightmaps") or {}
+                    top = _heightmap(maps.get("MOTION_BLOCKING") or maps.get("WORLD_SURFACE") or [])
+                    if not top:
+                        continue
+                    local = 8 * 16 + 8
+                    min_y = int(root.get("yPos", -4))
+                    min_y = min_y * 16 if -16 < min_y < 16 else min_y
+                    y = min_y + top[local] - 1
+                    found.append((wx, y, wz, root, block_name_at(root, wx, y, wz)))
+        except Exception:
+            continue
+    return found
+
+
+async def restore_blocks(placed):
+    for x, y, z, original in placed:
+        await send_console(f"setblock {x} {y} {z} {original}", timeout=4)
+
+
+async def stress_world_burst(placed):
+    """One randomised burst: a few blocks, maybe a mob, then put it back."""
+
+    avoid = []
+    try:
+        for name in await online_player_names() or []:
+            pos = parse_pos(await entity_data(name, "Pos") or "")
+            if pos:
+                avoid.append((pos[0], pos[1]))
+    except Exception:
+        pass
+    columns = await asyncio.to_thread(find_quiet_columns, 6, tuple(avoid))
+    if not columns:
+        return "no untouched chunks, world load skipped"
+    random.shuffle(columns)
+    notes = []
+    for x, y, z, root, original in columns[:random.randint(1, 3)]:
+        if original in ("minecraft:air", "minecraft:cave_air", "minecraft:void_air"):
+            continue
+        await send_console(f"setblock {x} {y} {z} minecraft:cobblestone", timeout=4)
+        placed.append((x, y, z, original))
+        notes.append(f"placed {x},{y},{z}")
+        await asyncio.sleep(random.uniform(0.4, 1.5))
+        ok, _out = await send_console(f"setblock {x} {y} {z} {original}", timeout=4)
+        if ok and placed and placed[-1][:3] == (x, y, z):
+            placed.pop()
+    # Hostile mobs only in real darkness (block light 0 and sky light 0), then removed.
+    for x, y, z, root, _original in columns:
+        block_light, sky_light = light_at(root, x, y + 1, z)
+        if block_light != 0 or sky_light != 0:
+            continue
+        if random.random() < 0.5:
+            continue
+        await send_console(
+            f"summon minecraft:zombie {x} {y + 1} {z} {{Tags:[\"stresstest\"],PersistenceRequired:0}}",
+            timeout=4,
+        )
+        await asyncio.sleep(random.uniform(1, 3))
+        await send_console('kill @e[tag=stresstest]', timeout=4)
+        notes.append(f"mob {x},{y+1},{z}")
+        break
+    return ", ".join(notes) or "quiet burst"
+
+
+async def ping_once(host):
+    """ICMP time from ping itself, not the time spent starting the process."""
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ping", "-c", "1", "-W", "1", host,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=2)
+        match = re.search(r"time[=<]([0-9.]+)", out.decode(errors="replace"))
+        return float(match.group(1)) if match else None
+    except Exception:
+        return None
+
+
+async def tailscale_peers():
+    """Other Tailscale nodes. Pinging our own 100.x address does not test the path."""
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "tailscale", "status", "--json",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=4)
+        data = json.loads(out.decode() or "{}")
+    except Exception:
+        return []
+    peers = []
+    for peer in (data.get("Peer") or {}).values():
+        if not peer.get("Online"):
+            continue
+        ips = peer.get("TailscaleIPs") or []
+        if ips:
+            peers.append((peer.get("HostName") or ips[0], ips[0]))
+    return peers
+
+
+async def tailscale_ip():
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "tailscale", "ip", "-4",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=3)
+        text = out.decode().strip().split()
+        return text[0] if text else None
+    except Exception:
+        return None
+
+
+async def network_burst():
+    """Parallel pings. Tailscale is measured to a peer, not to ourselves."""
+
+    targets = [("local", "127.0.0.1"), ("public", "1.1.1.1")]
+    peers = await tailscale_peers()
+    if peers:
+        name, ip = peers[0]
+        targets.append((f"tailscale {name}", ip))
+    else:
+        targets.append(("tailscale", None))
+    async def sample(label, host):
+        if not host:
+            return f"{label}: no peer online"
+        results = await asyncio.gather(*(ping_once(host) for _ in range(12)))
+        values = [item for item in results if item is not None]
+        if not values:
+            return f"{label}: no reply"
+        return (
+            f"{label}: avg {sum(values)/len(values):.0f} ms, "
+            f"min {min(values):.0f}, max {max(values):.0f}, "
+            f"{len(values)}/12 ok"
+        )
+    return await asyncio.gather(*(sample(label, host) for label, host in targets))
+
+
+async def health_snapshot():
+    pid = await find_server_pid()
+    if pid is None:
+        return ["server offline"]
+    age, info, tps_result, (rss_kb, cpu), cmdline = await asyncio.gather(
+        server_age(pid), get_player_info(), get_tps(), process_usage(pid),
+        asyncio.to_thread(process_cmdline, pid),
+    )
+    xmx_kb = heap_limit_kb(cmdline)
+    lines = [time.strftime("%H:%M:%S")]
+    lines.append("TPS: unavailable" if tps_result is None else f"TPS: {fmt_tps(*tps_result)}")
+    lines.append(format_players(info))
+    if age is not None:
+        lines.append(f"Server uptime: {format_uptime(age)}")
+    lines.append(f"RAM: {format_ram(rss_kb)}" + (f" (max heap {format_ram(xmx_kb)})" if xmx_kb else ""))
+    lines.append("CPU: unavailable" if cpu is None else f"CPU: {cpu:.0f}% (100% = 1 core)")
+    lines.extend(host_power_lines())
+    lines.append(disk_usage_text())
+    return lines
+
+
+class StressView(discord.ui.View):
+    def __init__(self, stop_event):
+        super().__init__(timeout=None)
+        self.stop_event = stop_event
+
+    @discord.ui.button(label="Stop test", style=discord.ButtonStyle.danger, custom_id="stresstest:stop")
+    async def stop_test(self, interaction, button):
+        if not await gate(interaction, admin=True):
+            return
+        self.stop_event.set()
+        await interaction.response.defer()
+
+
+@bot.tree.command(name="stresstest", description="Randomised 4-player load, network, and health log")
+@app_commands.describe(minutes="How long. Default 5, maximum 60")
+async def stresstest(interaction: discord.Interaction, minutes: typing.Optional[int] = 5):
+    global _stress_running
+    if not await gate(interaction, admin=True):
+        return
+    if _stress_running:
+        await deny(interaction, "A stress test is already running.")
+        return
+    minutes = 5 if minutes is None else max(1, min(60, minutes))
+    if not await server_running():
+        await deny(interaction, "Start the server first.")
+        return
+    _stress_running = True
+    stop_event = asyncio.Event()
+    view = StressView(stop_event)
+    placed = []
+    await interaction.response.defer(ephemeral=False)
+    # A channel message stays editable past 15 minutes. A followup webhook does not.
+    message = await interaction.channel.send(
+        embed=panel("Stress test", [f"Starting a {minutes} min randomised load."], COLOR_WAIT),
+        view=view,
+    )
+    bot.add_view(view, message_id=message.id)
+    await interaction.followup.send(f"Stress test panel: {message.jump_url}", ephemeral=False)
+    log_path = os.path.join(BOT_LOG_DIR, "stresstest.log")
+    deadline = time.monotonic() + minutes * 60
+    try:
+        while time.monotonic() < deadline and not stop_event.is_set():
+            try:
+                if random.random() < 0.65:
+                    world_note = await stress_world_burst(placed)
+                else:
+                    world_note = "idle gap"
+                    await asyncio.sleep(random.uniform(2, 6))
+                health = await health_snapshot()
+                net = list(await network_burst())
+            except Exception as error:
+                log.warning("stress cycle failed: %s", error)
+                health, net, world_note = [f"cycle error: {error}"], [], ""
+            lines = health + ([world_note] if world_note else []) + net
+            stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            try:
+                with open(log_path, "a", encoding="utf-8") as file:
+                    file.write(stamp + " | " + " | ".join(lines) + "\n")
+            except OSError:
+                pass
+            left = max(0, int(deadline - time.monotonic()))
+            try:
+                await message.edit(
+                    embed=panel(
+                        "Stress test",
+                        [f"{left // 60}m {left % 60}s left", *lines],
+                        COLOR_WAIT,
+                    ),
+                    view=view,
+                )
+            except EDIT_ERRORS:
+                pass
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=random.uniform(8, 15))
+            except asyncio.TimeoutError:
+                pass
+    finally:
+        await restore_blocks(placed)
+        await send_console('kill @e[tag=stresstest]', timeout=4)
+        _stress_running = False
+        try:
+            await message.edit(
+                embed=panel("Stress test finished", [f"Log: `{log_path}`"], COLOR_OK),
+                view=None,
+            )
+        except EDIT_ERRORS:
+            pass
+
+
 # ============================================================
 # /HEALTH /PLAYERS /TPS
 # ============================================================
@@ -6835,7 +7284,18 @@ async def tps(interaction: discord.Interaction):
     if all(line.endswith("unavailable") for line in lines):
         await followup_text(interaction, "[!] **Couldn't read TPS or MSPT.**")
         return
-    await followup_embed(interaction, panel("TPS", lines, COLOR_INFO))
+    global _tps_graph_running
+    if _tps_graph_running:
+        await followup_text(interaction, "A TPS graph is already running.")
+        return
+    _tps_graph_running = True
+    chart = tps_chart(300, "TPS")
+    message = await interaction.followup.send(
+        embed=panel("TPS, collecting 5 minutes", lines, COLOR_INFO),
+        file=discord.File(io.BytesIO(chart), filename="tps.png"),
+        wait=True,
+    )
+    spawn(tps_graph_follow(message, 300))
 
 
 # ============================================================
@@ -7649,6 +8109,15 @@ async def run_demand_log(interaction, session):
     finally:
         log_sessions.pop(session.target, None)
         await _safe_message_edit(message, session.render(title), view=None)
+        if session.target == "tps":
+            try:
+                chart = tps_chart(session.minutes * 60, "TPS")
+                await message.channel.send(
+                    f"TPS graph for the last {session.minutes} minutes.",
+                    file=discord.File(io.BytesIO(chart), filename="tps-log.png"),
+                )
+            except EDIT_ERRORS:
+                pass
 
 
 @bot.tree.command(name="log", description="Start a short log for one system")
