@@ -256,7 +256,7 @@ def warn_throttled(key, message, *args, every=300):
 # CONFIG
 # ============================================================
 
-VERSION = "1.00"
+VERSION = "1.12"
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = env_int("DISCORD_GUILD_ID", 0)
@@ -4031,7 +4031,7 @@ async def health_loop():
 
 @bot.event
 async def on_ready():
-    log.info("Logged in as %s. MC Server Manager is online.", bot.user)
+    log.info("Logged in as %s. MC Server Manager %s is online.", bot.user, VERSION)
     if getattr(bot, "_announced", False):
         return
     bot._announced = True
@@ -4082,9 +4082,10 @@ COMMANDS = (
 def online_embed():
     embed = discord.Embed(
         title=f"Bot online {VERSION}",
-        description="The bot is up. The Minecraft server was left as it was.",
+        description=f"Version {VERSION}. The bot is up. The Minecraft server was left as it was.",
         color=0x8B5A2B,
     )
+    embed.set_footer(text=f"version {VERSION}")
     embed.add_field(name="Commands", value=COMMANDS, inline=False)
     return embed
 
