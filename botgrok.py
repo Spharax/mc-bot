@@ -4449,6 +4449,9 @@ async def stop(interaction: discord.Interaction):
 async def restart(interaction: discord.Interaction):
     if not await gate(interaction):
         return
+    if _stress_running:
+        await deny(interaction, "Cannot shut off server during a test.")
+        return
     await ask_confirm(
         interaction, "restart", "**Restart the Minecraft server?**", run_restart
     )
@@ -5523,7 +5526,7 @@ async def chat_start(player):
 
 @bot.event
 async def on_message(message):
-    if message.author.bot or message.guild is None:
+    if (message.author.bot and message.webhook_id is None) or message.guild is None:
         return
     if GUILD_ID and message.guild.id != GUILD_ID:
         return
@@ -7214,7 +7217,9 @@ async def stresstest(interaction: discord.Interaction, minutes: typing.Optional[
     log_path = os.path.join(BOT_LOG_DIR, "stresstest.log")
     deadline = time.monotonic() + minutes * 60
     next_warn = 0.0
-    await send_console("save-off", timeout=4)
+    ok, _out = await send_console("save-off", timeout=4)
+    if ok:
+        mark_autosave_off()
     try:
         while time.monotonic() < deadline and not stop_event.is_set():
             if time.monotonic() >= next_warn:
@@ -7262,7 +7267,7 @@ async def stresstest(interaction: discord.Interaction, minutes: typing.Optional[
     finally:
         left = await restore_blocks(placed)
         await send_console('kill @e[tag=stresstest]', timeout=4)
-        await send_console("save-on", timeout=4)
+        await restore_autosave()
         _stress_running = False
         view.stop()
         done = [f"Log: `{log_path}`"]
