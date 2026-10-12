@@ -4353,6 +4353,11 @@ class ConfirmView(discord.ui.View):
         self.stop()
         open_confirms.discard(self)
         cmd_log.info("/%s confirmed by %s", self.op, describe_user(interaction.user))
+        if self.op in ("stop", "restart") and _stress_running:
+            await interaction.response.edit_message(
+                content="Cannot shut off server during a test.", view=None
+            )
+            return
         if not try_lock(self.op):
             await interaction.response.edit_message(
                 content=f"Busy: `/{current_op}` is still in progress.", view=None
@@ -4884,6 +4889,9 @@ load_backup_state()
 @bot.tree.command(name="save", description="Save the world with save-all flush")
 @managed("save")
 async def save(interaction: discord.Interaction):
+    if _stress_running:
+        await deny(interaction, "Cannot save during a test. Changes are not kept.")
+        return
     msg = await open_status(interaction, "Saving world...")
 
     if not await server_running(force=True):
@@ -7202,6 +7210,7 @@ async def stresstest(interaction: discord.Interaction, minutes: typing.Optional[
         await deny(interaction, "Start the server first.")
         return
     _stress_running = True
+    invalidate_confirms("A stress test started.")
     stop_event = asyncio.Event()
     view = StressView(stop_event)
     placed = []
@@ -9541,7 +9550,8 @@ def update_from_github():
     if local.stdout.strip() == remote.stdout.strip():
         update_log(f"GitHub is current ({local.stdout.strip()[:8]}).")
         return
-    update_log(f"Update found ({local.stdout.strip()[:8]} -> {remote.stdout.strip()[:8]}). Downloading.")
+    previous = local.stdout.strip()
+    update_log(f"Update found ({previous[:8]} -> {remote.stdout.strip()[:8]}). Downloading.")
     try:
         pulled = _git(["pull", "--ff-only", "origin", "main"], timeout=GIT_TIMEOUT)
         now = _git(["rev-parse", "HEAD"], timeout=10)
@@ -9571,7 +9581,12 @@ def update_from_github():
         update_log(f"Compile check failed: {error}")
         return
     if check.returncode != 0:
-        update_log(f"Downloaded file does not compile. Not restarting.\n{check.stdout}".rstrip())
+        update_log(f"Downloaded file does not compile. Rolling back.\n{check.stdout}".rstrip())
+        rolled = _git(["reset", "--hard", previous], timeout=20)
+        update_log(
+            "Rolled back." if rolled.returncode == 0
+            else f"Rollback failed.\n{rolled.stdout}".rstrip()
+        )
         return
     update_log(f"Download verified ({now.stdout.strip()[:8]}). Restarting onto the new code.")
     os._exit(1)
