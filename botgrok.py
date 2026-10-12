@@ -256,7 +256,7 @@ def warn_throttled(key, message, *args, every=300):
 # CONFIG
 # ============================================================
 
-VERSION = "1.201"
+VERSION = "1.202"
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = env_int("DISCORD_GUILD_ID", 0)
@@ -5158,6 +5158,9 @@ async def chat_backup_from(player):
 
     global _chat_backup_last
     log.info("Chat !backup from %s", player)
+    if _stress_running:
+        await say_game("backup is blocked during a stress test")
+        return
     if not BACKUP_DIR:
         await say_game("backup is not configured")
         return
@@ -5916,6 +5919,9 @@ async def backup(interaction: discord.Interaction, action: str):
         return
     # make is open to members; looking at or restoring backups is admin only.
     if action in ("list", "restore") and not await gate(interaction, admin=True):
+        return
+    if _stress_running:
+        await deny(interaction, "Backup is blocked during a stress test.")
         return
     if not BACKUP_DIR:
         await deny(
@@ -8682,6 +8688,9 @@ class BotResetView(discord.ui.View):
 async def botreset(interaction: discord.Interaction):
     if not await gate(interaction, admin=True):
         return
+    if _stress_running:
+        await deny(interaction, "Cannot reset the bot during a stress test.")
+        return
     view = BotResetView()
     await interaction.response.send_message(
         "**Reset the bot?**\nIt goes offline, pulls the latest code from GitHub, "
@@ -8698,6 +8707,9 @@ async def botreset(interaction: discord.Interaction):
 @bot.tree.command(name="botstop", description="Stop this bot (the Minecraft server keeps running)")
 async def botstop(interaction: discord.Interaction):
     if not await gate(interaction, admin=True):
+        return
+    if _stress_running:
+        await deny(interaction, "Cannot stop the bot during a stress test.")
         return
 
     view = BotStopView()
