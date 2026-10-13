@@ -256,7 +256,7 @@ def warn_throttled(key, message, *args, every=300):
 # CONFIG
 # ============================================================
 
-VERSION = "1.212"
+VERSION = "1.213"
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = env_int("DISCORD_GUILD_ID", 0)
@@ -2758,6 +2758,28 @@ async def launch_server():
     return SimpleNamespace(proc=proc, log_offset=log_offset)
 
 
+def remove_legacy_dimension_folders():
+    """Paper 26 crashes if world_nether exists beside world/dimensions.
+
+    The nested folder is the layout Paper 26.3 loads. The old folder is only
+    a migration source, and Paper refuses to overwrite files already there.
+    """
+
+    root = server_root()
+    nested = os.path.join(root, "world", "dimensions", "minecraft")
+    removed = []
+    for dim, folder in PAPER_DIMS:
+        if not os.path.isdir(os.path.join(nested, dim)):
+            continue
+        for name in (folder, folder + ".old-layout", folder + ".old"):
+            path = os.path.join(root, name)
+            if os.path.isdir(path):
+                shutil.rmtree(path, ignore_errors=True)
+                removed.append(name)
+                log.info("Removed legacy dimension folder %s", name)
+    return removed
+
+
 async def launch_or_report(msg):
     # /start already checked, but a crash restart or a race must not exec the
     # script while Paper is up. The start script also exits immediately if the
@@ -2773,6 +2795,9 @@ async def launch_or_report(msg):
         await msg.set("[!] The old server did not finish shutting down.")
         return None
     await close_wake_listener()
+    removed = await asyncio.to_thread(remove_legacy_dimension_folders)
+    if removed:
+        await msg.set("Removed old dimension folders: " + ", ".join(removed))
 
     try:
         return await launch_server()
@@ -5219,6 +5244,7 @@ async def run_text_start(who, reply):
             return
         clear_controlled_stop()
         await close_wake_listener()
+        await asyncio.to_thread(remove_legacy_dimension_folders)
         try:
             mark = os.path.getsize(LOG_PATH)
         except OSError:
@@ -7360,6 +7386,7 @@ async def stress_start_server(status):
     # The wake listener owns 25565 while the server is down. Paper cannot bind
     # until that listener is closed.
     await close_wake_listener()
+    await asyncio.to_thread(remove_legacy_dimension_folders)
     await asyncio.sleep(PORT_WAIT)
     cursor = LogCursor()
     launch = await launch_server()
