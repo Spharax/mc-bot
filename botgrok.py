@@ -256,7 +256,7 @@ def warn_throttled(key, message, *args, every=300):
 # CONFIG
 # ============================================================
 
-VERSION = "1.211"
+VERSION = "1.212"
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = env_int("DISCORD_GUILD_ID", 0)
@@ -5742,6 +5742,19 @@ def restore_backup_folder(folder):
                 moved.append((dest, aside))
             created.append(dest)
             shutil.copytree(os.path.join(folder, name), dest)
+        # The copy is in place. The renamed worlds and any old-layout leftovers
+        # are no longer needed, and Paper 26 crashes if both layouts exist.
+        for _dest, aside in moved:
+            shutil.rmtree(aside, ignore_errors=True)
+        for name in os.listdir(root):
+            path = os.path.join(root, name)
+            stale = (
+                name.endswith((".old", ".old-layout", ".before-restore"))
+                or ".before-restore-" in name
+            )
+            if stale and os.path.isdir(path):
+                shutil.rmtree(path, ignore_errors=True)
+                log.info("Removed leftover world folder %s", name)
         return list(names)
     except Exception:
         for path in reversed(created):
