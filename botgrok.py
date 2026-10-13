@@ -256,7 +256,7 @@ def warn_throttled(key, message, *args, every=300):
 # CONFIG
 # ============================================================
 
-VERSION = "1.213"
+VERSION = "1.214"
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = env_int("DISCORD_GUILD_ID", 0)
@@ -5731,7 +5731,7 @@ def recent_backups(limit=5, complete_only=True):
 
 # Backed up next to the worlds but never restored: a restore must not roll back
 # plugins, configs or server.properties (RCON settings live there).
-RESTORE_SKIP = frozenset(BACKUP_DIRS) | frozenset(BACKUP_FILES) | {"backup.txt", "failed.log"}
+RESTORE_SKIP = frozenset(BACKUP_DIRS) | frozenset(BACKUP_FILES) | {"backup.txt", "failed.log", "world_nether", "world_the_end"}
 
 
 def restore_backup_folder(folder):
@@ -5781,6 +5781,7 @@ def restore_backup_folder(folder):
             if stale and os.path.isdir(path):
                 shutil.rmtree(path, ignore_errors=True)
                 log.info("Removed leftover world folder %s", name)
+        remove_legacy_dimension_folders()
         return list(names)
     except Exception:
         for path in reversed(created):
