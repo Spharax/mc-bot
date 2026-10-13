@@ -256,7 +256,7 @@ def warn_throttled(key, message, *args, every=300):
 # CONFIG
 # ============================================================
 
-VERSION = "1.202"
+VERSION = "1.203"
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = env_int("DISCORD_GUILD_ID", 0)
@@ -7282,7 +7282,56 @@ async def stress_stop_server(status):
     )
 
 
+async def tmux_session_exists():
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "tmux", "has-session", "-t", MC_SESSION,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        return await proc.wait() == 0
+    except OSError:
+        return False
+
+
+async def kill_tmux_session():
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "tmux", "kill-session", "-t", MC_SESSION,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.wait()
+    except OSError:
+        pass
+
+
+async def wait_until_fully_stopped(status, timeout=90):
+    """Paper 26 can spend a minute closing RegionFile and Moonrise pools.
+
+    The start script exits immediately if the tmux session still exists, so a
+    start during that window watches the old process die and reports a crash.
+    """
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        running = await server_running(force=True)
+        session = await tmux_session_exists()
+        if not running and not session:
+            return True
+        if not running and session:
+            await status.set("Clearing the leftover tmux session.")
+            await kill_tmux_session()
+        else:
+            await status.set("Waiting for the old server to finish shutting down.")
+        await asyncio.sleep(1)
+    return False
+
+
 async def stress_start_server(status):
+    if not await wait_until_fully_stopped(status):
+        await status.set("The old server did not finish shutting down.")
+        return False
     # The wake listener owns 25565 while the server is down. Paper cannot bind
     # until that listener is closed.
     await close_wake_listener()
