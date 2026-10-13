@@ -256,7 +256,7 @@ def warn_throttled(key, message, *args, every=300):
 # CONFIG
 # ============================================================
 
-VERSION = "1.21"
+VERSION = "1.211"
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = env_int("DISCORD_GUILD_ID", 0)
@@ -4709,7 +4709,6 @@ async def perform_backup(kind):
         os.makedirs(folder, exist_ok=False)
         for src in sources:
             await asyncio.to_thread(_copy_into, src, folder)
-        await asyncio.to_thread(split_paper_dimensions, folder, False)
         manifest = os.path.join(folder, "backup.txt")
         with open(manifest, "w", encoding="utf-8") as file:
             file.write(f"kind={kind}\nnumber={number}\nwhen={stamp}\n")
@@ -5743,9 +5742,7 @@ def restore_backup_folder(folder):
                 moved.append((dest, aside))
             created.append(dest)
             shutil.copytree(os.path.join(folder, name), dest)
-        copied = list(names)
-        copied.extend(split_paper_dimensions(root, move=True))
-        return copied
+        return list(names)
     except Exception:
         for path in reversed(created):
             shutil.rmtree(path, ignore_errors=True)
