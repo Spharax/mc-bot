@@ -256,7 +256,7 @@ def warn_throttled(key, message, *args, every=300):
 # CONFIG
 # ============================================================
 
-VERSION = "1.203"
+VERSION = "1.21"
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = env_int("DISCORD_GUILD_ID", 0)
@@ -2760,13 +2760,19 @@ async def launch_server():
 
 async def launch_or_report(msg):
     # /start already checked, but a crash restart or a race must not exec the
-    # script while Paper is up.
+    # script while Paper is up. The start script also exits immediately if the
+    # tmux session still exists, which is exactly what a Paper 26 shutdown looks
+    # like for up to a minute.
     if await server_running(force=True):
         await msg.set(
             "[+] **Server is already running.** Not launching a second process.",
             force=True,
         )
         return None
+    if not await wait_until_fully_stopped(msg):
+        await msg.set("[!] The old server did not finish shutting down.")
+        return None
+    await close_wake_listener()
 
     try:
         return await launch_server()
@@ -4202,11 +4208,11 @@ async def start(interaction: discord.Interaction):
         return
 
     await cancel_idle_shutdown("Server is starting.")
-    clear_controlled_stop()
 
     t0 = time.monotonic()
     cursor = LogCursor()
     launch = await launch_or_report(msg)
+    clear_controlled_stop()
     if launch is None:
         return
 
@@ -5204,7 +5210,16 @@ async def run_text_start(who, reply):
             return
         await reply(f"{who} is starting the server")
         await cancel_idle_shutdown("!start")
+
+        class ReplyStatus:
+            async def set(self, text, force=False):
+                await reply(text)
+
+        if not await wait_until_fully_stopped(ReplyStatus()):
+            await reply("the old server did not finish shutting down")
+            return
         clear_controlled_stop()
+        await close_wake_listener()
         try:
             mark = os.path.getsize(LOG_PATH)
         except OSError:
