@@ -256,7 +256,7 @@ def warn_throttled(key, message, *args, every=300):
 # CONFIG
 # ============================================================
 
-VERSION = "1.214"
+VERSION = "1.215"
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = env_int("DISCORD_GUILD_ID", 0)
