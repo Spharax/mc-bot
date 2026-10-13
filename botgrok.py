@@ -256,7 +256,7 @@ def warn_throttled(key, message, *args, every=300):
 # CONFIG
 # ============================================================
 
-VERSION = "1.215"
+VERSION = "1.216"
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = env_int("DISCORD_GUILD_ID", 0)
@@ -2758,6 +2758,31 @@ async def launch_server():
     return SimpleNamespace(proc=proc, log_offset=log_offset)
 
 
+def clean_stale_world_folders():
+    """Delete leftover world copies before start.
+
+    Same as: rm -rf *.before-restore *.before-restore-* *.old-layout *.old
+    """
+
+    root = server_root()
+    removed = []
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return removed
+    for name in names:
+        path = os.path.join(root, name)
+        stale = (
+            name.endswith((".before-restore", ".old-layout", ".old"))
+            or ".before-restore-" in name
+        )
+        if stale and os.path.isdir(path):
+            shutil.rmtree(path, ignore_errors=True)
+            removed.append(name)
+            log.info("Removed stale world folder %s", name)
+    return removed
+
+
 def remove_legacy_dimension_folders():
     """Paper 26 crashes if world_nether exists beside world/dimensions.
 
@@ -2795,9 +2820,10 @@ async def launch_or_report(msg):
         await msg.set("[!] The old server did not finish shutting down.")
         return None
     await close_wake_listener()
-    removed = await asyncio.to_thread(remove_legacy_dimension_folders)
+    removed = await asyncio.to_thread(clean_stale_world_folders)
+    removed.extend(await asyncio.to_thread(remove_legacy_dimension_folders))
     if removed:
-        await msg.set("Removed old dimension folders: " + ", ".join(removed))
+        await msg.set("Removed old world folders: " + ", ".join(removed))
 
     try:
         return await launch_server()
