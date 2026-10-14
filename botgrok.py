@@ -104,7 +104,7 @@ defers right after them, so Discord does not expire the interaction (error
 10062) and refusals stay private (an ephemeral reply is only honoured if it is
 the first response).
 
-In-game lines from this bot, including /say, are sent as `say [bot-warn]: ...`.
+In-game lines from say_bot() (health, warnings, ping list) are sent as `say [bot-warn]: ...`. say_game() (including /say) uses `say [bot]: ...`.
 Health warnings (TPS under the limit, high server RAM, stuck RCON) are also
 said in Minecraft chat, and that line repeats on the same cooldown as Discord
 (default 60s) while the problem lasts. A failed in-game line is logged once
@@ -512,7 +512,8 @@ def prune_local_logs():
                 continue
             age = now - _mtime(path)
             leftover = name.startswith("map-") and name.endswith(".png")
-            old_log = name.endswith((".log.gz", ".log.1", ".txt")) or "debug" in name
+            # why: arbitrary .txt is not a log; crash reports are pruned by count above
+            old_log = name.endswith((".log.gz", ".log.1")) or "debug" in name
             if leftover or (old_log and age > 2 * 86400):
                 try:
                     os.remove(path)
@@ -1255,7 +1256,7 @@ class Status:
     async def reanchor(self, text):
         """Post a channel message and edit that from here on. Bot token, no 15-minute cap."""
 
-        if self.anchored or self.interaction is None:
+        if self.anchored:  # why: anchored is set from interaction is None, so the second check was dead
             return True
         channel = self.interaction.channel
         if channel is None:
@@ -2350,7 +2351,7 @@ HAVE_PROC = os.path.isdir("/proc/self")
 SERVER_RE = re.compile(SERVER_PATTERN)
 _server_pid = None  # cached so the common "still running" check forks nothing
 _server_scan_at = 0.0
-SERVER_SCAN_EVERY = 0  # re-scan on every call so a second JVM cannot go unnoticed
+SERVER_SCAN_EVERY = 5  # re-scan at most every 5s so a second JVM is caught quickly without rescanning on every status poll
 
 
 class AmbiguousServer(Exception):
@@ -2894,6 +2895,8 @@ def clean_stale_world_folders():
 
 def remove_legacy_dimension_folders():
     """Paper 26 crashes if world_nether exists beside world/dimensions.
+
+    PAPER_DIMS (defined with the backup helpers) is shared with this cleanup.
 
     The nested folder is the layout Paper 26.3 loads. The old folder is only
     a migration source, and Paper refuses to overwrite files already there.
@@ -4870,27 +4873,6 @@ def backup_sources():
         if os.path.isfile(path):
             found.append(path)
     return found
-
-
-def split_paper_dimensions(root, move=False):
-    """Put nested Nether and End into the folders Paper loads."""
-
-    nested = os.path.join(root, "world", "dimensions", "minecraft")
-    done = []
-    for dim, folder in PAPER_DIMS:
-        src = os.path.join(nested, dim)
-        if not os.path.isdir(src):
-            continue
-        dest = os.path.join(root, folder, "dimensions", "minecraft", dim)
-        if os.path.isdir(dest):
-            continue
-        os.makedirs(os.path.dirname(dest), exist_ok=True)
-        if move:
-            shutil.move(src, dest)
-        else:
-            shutil.copytree(src, dest)
-        done.append(folder)
-    return done
 
 
 def _copy_into(src, dest_dir):
@@ -7182,8 +7164,6 @@ def tps_chart(window, title):
         put(left, y, (60, 70, 80))
     for x in range(left, right):
         put(x, bottom, (60, 70, 80))
-        if (20 - 0) and False:
-            pass
     for mark in (0, 10, 20):
         y = bottom - int((mark / 20) * (bottom - top))
         for x in range(left, right, 4):
@@ -7361,7 +7341,6 @@ async def stress_world_burst(placed):
     notes = []
     for x, y, z, root, original in columns[:random.randint(1, 3)]:
         original = safe_block(original)
-        above = safe_block(block_name_at(root, x, y + 1, z))
         if original is None:
             continue
         ok, _out = await send_console(f"setblock {x} {y} {z} minecraft:cobblestone", timeout=4)
