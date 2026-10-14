@@ -3016,6 +3016,8 @@ class LogCursor:
 
 def _read_tail(path, size):
     """Internal: read tail."""
+    if size <= 0:
+        return None  # why: callers treat None as unreadable; b"" would hide a bad size
     try:
         with open(path, "rb") as file:
             file.seek(0, os.SEEK_END)
@@ -4790,6 +4792,11 @@ def save_backup_state():
         log.warning("Couldn't save backup state: %s", error)
 
 
+async def save_backup_state_async():
+    """Persist backup state off the event loop."""
+    await asyncio.to_thread(save_backup_state)  # why: fsync can stall the loop for hundreds of ms
+
+
 def note_backup_success():
     """Record a successful backup."""
     _backup_state["uptime"] = 0.0
@@ -4797,7 +4804,6 @@ def note_backup_success():
     _backup_state["last_backup"] = time.time()
     _backup_state["warned"] = False
     _backup_state["last_fail"] = 0.0
-    save_backup_state()
     log.info("Backup counters reset")
 
 
@@ -4927,7 +4933,7 @@ async def perform_backup(kind):
     key = "auto_number" if kind == "auto" else "manual_number"
     number = int(_backup_state.get(key) or 0) + 1
     _backup_state[key] = number
-    save_backup_state()
+    await save_backup_state_async()
     stamp = time.strftime("%Y-%m-%d %H-%M")
     folder = os.path.join(BACKUP_DIR, backup_folder_name(kind, number, stamp))
     try:
@@ -5002,7 +5008,7 @@ async def sample_backup_clock(pid):
         _backup_state["warned"] = False
     changed = pid != prev_pid or _backup_state["warned"] != prev_warned
     if changed or time.monotonic() - _backup_state_saved_at >= BACKUP_STATE_SAVE_EVERY:
-        save_backup_state()
+        await save_backup_state_async()
 
 
 async def warn_overdue_backup():
@@ -5016,7 +5022,7 @@ async def warn_overdue_backup():
     ):
         return
     _backup_state["warned"] = True
-    save_backup_state()
+    await save_backup_state_async()
     skips = backup_intervals_due(seconds, AUTO_BACKUP_AFTER)
     kind = "playtime" if AUTO_BACKUP_METRIC == "playtime" else "uptime"
     extra = (
@@ -5082,13 +5088,14 @@ async def auto_backup_if_due():
                 code, tail, folder = await perform_backup("auto")
             except OSError as error:
                 _backup_state["last_fail"] = time.time()
-                save_backup_state()
+                await save_backup_state_async()
                 await report_backup_failure("auto", f"could not start: {error}")
                 return
             lines = tail.decode(errors="ignore").strip().splitlines()[-4:]
             detail = "\n".join(_clip(line) for line in lines)
             if code == 0:
                 note_backup_success()
+                await save_backup_state_async()  # why: note_backup_success no longer fsyncs on the loop
                 await prune_backups()
                 await send_alert(
                     "**Automatic backup finished.** "
@@ -5099,11 +5106,11 @@ async def auto_backup_if_due():
                 return
             elif code is None:
                 _backup_state["last_fail"] = time.time()
-                save_backup_state()
+                await save_backup_state_async()
                 reason = f"timed out after {BACKUP_TIMEOUT}s"
             else:
                 _backup_state["last_fail"] = time.time()
-                save_backup_state()
+                await save_backup_state_async()
                 reason = f"exit code {code}"
             await report_backup_failure("auto", reason, folder, detail)
         finally:
@@ -5365,6 +5372,7 @@ async def run_manual_backup():
         output = tail.decode(errors="ignore").strip()
         if code == 0:
             note_backup_success()
+            await save_backup_state_async()  # why: note_backup_success no longer fsyncs on the loop
             await prune_backups()
             return True, "ok", folder, elapsed
         if code is None:
@@ -5595,7 +5603,9 @@ async def _pipe(reader, writer):
                 break
             writer.write(data)
             await writer.drain()
-    except (OSError, asyncio.CancelledError):
+    except asyncio.CancelledError:
+        raise  # why: swallowing cancellation leaves the pipe task running
+    except OSError:
         pass
     finally:
         try:
@@ -5624,6 +5634,8 @@ async def handle_wake(reader, writer):
         writer.close()
         return
     log.info("Wake: login from %s, starting the server", who)
+    global _wake_holds
+    _wake_holds += 1  # why: increment before spawn so wake_on_ping_loop cannot see 0 and rebind
     spawn(hold_join(reader, writer, raw, who))
 
 
@@ -5664,7 +5676,7 @@ async def hold_join(reader, writer, raw, who):
     """Keep the client on the connecting screen, then splice it to the real server."""
 
     global _wake_holds
-    _wake_holds += 1
+    # why: handle_wake already incremented; this task only decrements in finally
     queue = asyncio.Queue()
     queue.put_nowait(raw)
     client_gone = False
@@ -5951,7 +5963,8 @@ def recent_backups(limit=5, complete_only=True):
 
 # Backed up next to the worlds but never restored: a restore must not roll back
 # plugins, configs or server.properties (RCON settings live there).
-RESTORE_SKIP = frozenset(BACKUP_DIRS) | frozenset(BACKUP_FILES) | {"backup.txt", "failed.log", "world_nether", "world_the_end"}
+# why: old-layout servers back up world_nether/world_the_end; skipping them on restore leaves dimensions inconsistent. remove_legacy_dimension_folders() still cleans leftovers on Paper 26 nested layout.
+RESTORE_SKIP = frozenset(BACKUP_DIRS) | frozenset(BACKUP_FILES) | {"backup.txt", "failed.log"}
 
 
 def restore_backup_folder(folder):
@@ -9817,6 +9830,10 @@ def props_edit(key_input, value_input):
     temp = os.path.join(directory, ".server.properties.bot-tmp")
     try:
         shutil.copy2(PROPS_PATH, backup)
+        try:
+            os.chmod(backup, 0o600)  # why: copy2 keeps 0644, which exposes rcon.password
+        except OSError as error:
+            log.warning("Couldn't restrict permissions on %s: %s", backup, error)
         with open(temp, "w", encoding=encoding, newline="") as file:
             file.write("".join(out))
             file.flush()
@@ -9825,6 +9842,10 @@ def props_edit(key_input, value_input):
             shutil.copymode(PROPS_PATH, temp)
         except OSError:
             pass
+        try:
+            os.chmod(temp, 0o600)  # why: the file os.replace puts in place must not be world-readable
+        except OSError as error:
+            log.warning("Couldn't restrict permissions on %s: %s", temp, error)
         os.replace(temp, PROPS_PATH)
     except OSError as error:
         raise OSError(
@@ -10351,8 +10372,14 @@ def update_from_github():
         )
         return
     try:
+        try:
+            src_name = os.path.basename(os.path.abspath(__file__))
+        except NameError:
+            src_name = "botgrok.py"
+            log.warning("No __file__; update compile check falling back to botgrok.py")
+        # why: the running file may not be named botgrok.py; a missing path fails compile and rolls back forever
         check = subprocess.run(
-            [sys.executable, "-m", "py_compile", os.path.join(BASE_DIR, "botgrok.py")],
+            [sys.executable, "-m", "py_compile", os.path.join(BASE_DIR, src_name)],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
             timeout=COMPILE_TIMEOUT,
         )
