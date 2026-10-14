@@ -184,6 +184,7 @@ LOG_FORMAT = "%(asctime)s %(levelname)-7s %(name)s: %(message)s"
 
 
 def env_level(name, default="INFO"):
+    """Return a logging level from an environment variable."""
     return LOG_LEVELS.get(os.getenv(name, "").strip().upper(), LOG_LEVELS[default])
 
 
@@ -204,6 +205,7 @@ if not log.handlers:
 
 
 def env_int(name, default, minimum=None):
+    """Read an integer environment variable, clamped to a minimum."""
     raw = os.getenv(name)
     value = default
     if raw is not None and raw.strip() != "":
@@ -220,6 +222,7 @@ def env_int(name, default, minimum=None):
 
 
 def env_float(name, default, minimum=None):
+    """Read a float environment variable, clamped to a minimum."""
     raw = os.getenv(name)
     value = default
     if raw is not None and raw.strip() != "":
@@ -234,6 +237,7 @@ def env_float(name, default, minimum=None):
 
 
 def env_bool(name, default=False):
+    """Read a boolean environment variable (1/true/yes/on)."""
     raw = os.getenv(name, "").strip().lower()
     if raw == "":
         return default
@@ -403,6 +407,7 @@ BOT_LOG_FILE = setup_file_logging()
 
 
 def _mtime(path):
+    """Internal: mtime."""
     try:
         return os.path.getmtime(path)
     except OSError:
@@ -518,6 +523,7 @@ def prune_local_logs():
 
 
 async def log_prune_loop():
+    """Background loop that prunes old log files."""
     await bot.wait_until_ready()
     while True:
         try:
@@ -565,6 +571,7 @@ def spawn(coro):
     """create_task that keeps a reference and logs failures."""
 
     def done(task):
+        """Done."""
         _bg_tasks.discard(task)
         if not task.cancelled() and task.exception() is not None:
             log.error("Background task failed", exc_info=task.exception())
@@ -580,15 +587,18 @@ def spawn(coro):
 # ============================================================
 
 def describe_user(user):
+    """Return a short description of a Discord user."""
     return f"{user} ({user.id})"
 
 
 def command_label(interaction):
+    """Return the name of the command being invoked."""
     command = getattr(interaction, "command", None)
     return f"/{command.qualified_name}" if command is not None else "interaction"
 
 
 def format_args(interaction):
+    """Format command arguments for the audit log."""
     try:
         return " ".join(f"{key}={value!r}" for key, value in interaction.namespace)
     except Exception:
@@ -599,6 +609,7 @@ class MCCommandTree(app_commands.CommandTree):
     """Writes one audit line for every slash command that is run."""
 
     async def interaction_check(self, interaction):
+        """Interaction check."""
         try:
             cmd_log.info(
                 "%s %s by %s (guild %s, channel %s)",
@@ -629,8 +640,10 @@ class MCCommandTree(app_commands.CommandTree):
 
 
 class MCServerBot(discord.Client):
+    """Discord bot that manages a Paper Minecraft server."""
 
     def __init__(self):
+        """Internal: init."""
         super().__init__(
             intents=intents,
             max_messages=None,  # no message cache needed
@@ -646,6 +659,7 @@ class MCServerBot(discord.Client):
         self._started = False  # background tasks started
 
     async def setup_hook(self):
+        """Setup hook."""
         # discord.py calls this on every login(), and run_bot_forever() may log
         # in again after a network failure. Only the command sync repeats.
         if not self._booted:
@@ -657,6 +671,7 @@ class MCServerBot(discord.Client):
             await self._start_background()
 
     async def _first_boot(self):
+        """Internal: first boot."""
         global tps_lock
 
         # Created here, inside the running loop. Python 3.9+ is required
@@ -669,6 +684,7 @@ class MCServerBot(discord.Client):
         log_startup_banner()
 
     async def _sync_commands(self):
+        """Internal: sync commands."""
         if GUILD_ID:
             guild = discord.Object(id=GUILD_ID)
             self.tree.copy_global_to(guild=guild)
@@ -682,6 +698,7 @@ class MCServerBot(discord.Client):
             log.info("Global slash commands synced")
 
     async def _start_background(self):
+        """Internal: start background."""
         log_startup_notes()
         log_props_note()
         spawn(startup_rcon_check())
@@ -730,6 +747,7 @@ class MCServerBot(discord.Client):
             )
 
     async def close(self):
+        """Close."""
         # close() can be called twice (/botstop, then discord.py's own cleanup).
         if not self._cleaned_up:
             self._cleaned_up = True
@@ -744,6 +762,7 @@ def install_loop_handlers(loop):
     """Log errors nobody caught, and shut down cleanly on SIGTERM (systemd stop)."""
 
     def on_loop_error(_loop, context):
+        """On loop error."""
         error = context.get("exception")
         message = context.get("message", "Unhandled error in the event loop")
         if error is not None:
@@ -754,6 +773,7 @@ def install_loop_handlers(loop):
     loop.set_exception_handler(on_loop_error)
 
     def on_sigterm():
+        """On sigterm."""
         log.warning("SIGTERM received, shutting down")
         spawn(bot.close())
 
@@ -765,6 +785,7 @@ def install_loop_handlers(loop):
 
 
 def log_startup_banner():
+    """Log the version and configuration banner."""
     log.info(
         "Starting MC bot %s (python %s, discord.py %s)",
         VERSION,
@@ -825,6 +846,7 @@ async def shutdown_cleanup():
 
 
 def log_startup_notes():
+    """Log non-fatal configuration warnings."""
     if LOG_CHANNEL_ID and not (LOG_BOT or LOG_MINECRAFT):
         log.warning(
             "MC_LOG_CHANNEL_ID is set but MC_LOG_BOT and MC_LOG_MINECRAFT are "
@@ -927,6 +949,7 @@ def member_is_admin(interaction) -> bool:
 
 
 def try_lock(name):
+    """Try to acquire the single-instance lock."""
     global current_op
 
     if current_op is not None:
@@ -947,6 +970,7 @@ def invalidate_confirms(reason):
 
 
 def release():
+    """Release the single-instance lock."""
     global current_op
     current_op = None
 
@@ -991,11 +1015,13 @@ def note_controlled_stop(pid):
 
 
 def clear_controlled_stop():
+    """Forget the current controlled-stop expectation."""
     global expected_stop
     expected_stop = None
 
 
 def clear_recent_stop():
+    """Forget the recent-stop record."""
     global recent_stop
     recent_stop = None
 
@@ -1096,6 +1122,7 @@ def one_line(text, width=200):
 
 
 def clip_discord(text, limit=DISCORD_LIMIT):
+    """Clip text to Discord's message length limit."""
     if text is None or len(text) <= limit:
         return text
     return text[: limit - 1] + "…"
@@ -1171,8 +1198,10 @@ def managed(op):
     """Wrap a no-argument admin command: begin(), run, release()."""
 
     def decorate(fn):
+        """Decorate."""
         @functools.wraps(fn)
         async def wrapper(interaction):
+            """Wrapper."""
             if not await begin(interaction, op):
                 return
             try:
@@ -1186,12 +1215,14 @@ def managed(op):
 
 
 async def followup_text(interaction, text, ephemeral=False):
+    """Send a follow-up text message to an interaction."""
     return await interaction.followup.send(
         clip_discord(calm(text)), ephemeral=ephemeral
     )
 
 
 async def followup_embed(interaction, embed, ephemeral=False):
+    """Send a follow-up embed to an interaction."""
     return await interaction.followup.send(embed=embed, ephemeral=ephemeral)
 
 
@@ -1208,6 +1239,7 @@ class Status:
     """
 
     def __init__(self, message, interaction=None, min_gap=None):
+        """Internal: init."""
         self.message = message
         self.interaction = interaction
         self.min_gap = EDIT_INTERVAL if min_gap is None else min_gap
@@ -1217,6 +1249,7 @@ class Status:
 
     @property
     def alive(self):
+        """Alive."""
         return self.message is not None
 
     async def reanchor(self, text):
@@ -1239,6 +1272,7 @@ class Status:
         return True
 
     async def set(self, text, force=False):
+        """Set."""
         if self.message is None and not self.anchored:
             await self.reanchor(text)
         if (
@@ -1297,6 +1331,7 @@ RELAY_MESSAGE_MAX = 1900
 
 
 def relay_clean(text):
+    """Sanitize a log line before relaying it."""
     text = ANSI_RE.sub("", text)
     text = FORMAT_CODE_RE.sub("", text)
     text = text.replace("\t", " ")
@@ -1335,6 +1370,7 @@ class MinecraftLogTail:
     MAX_PER_POLL = 512 * 1024
 
     def __init__(self, path):
+        """Internal: init."""
         self.path = path
         self.file = None
         self.ino = None
@@ -1343,6 +1379,7 @@ class MinecraftLogTail:
         self.warned = False
 
     def close(self):
+        """Close."""
         if self.file is not None:
             try:
                 self.file.close()
@@ -1351,6 +1388,7 @@ class MinecraftLogTail:
         self.file = None
 
     def _open(self, from_start):
+        """Internal: open."""
         try:
             handle = open(self.path, "rb")
         except OSError:
@@ -1364,11 +1402,13 @@ class MinecraftLogTail:
         return True
 
     def _flush_carry(self, events):
+        """Internal: flush carry."""
         if self.carry:
             events.append(("line", self.carry.decode("utf-8", "replace").rstrip("\r")))
             self.carry = b""
 
     def _drain(self, events):
+        """Internal: drain."""
         read = 0
         while read < self.MAX_PER_POLL:
             data = self.file.read(_CHUNK)
@@ -1435,6 +1475,7 @@ class DiscordLogHandler(logging.Handler):
     """Hands the bot's own log lines to the relay as [mc-bot] lines."""
 
     def __init__(self, relay):
+        """Internal: init."""
         super().__init__(level=LOG_DISCORD_LEVEL)
         self.relay = relay
         self.addFilter(
@@ -1443,6 +1484,7 @@ class DiscordLogHandler(logging.Handler):
         )
 
     def emit(self, record):
+        """Emit."""
         try:
             text = (
                 f"{time.strftime('%H:%M:%S', time.localtime(record.created))} "
@@ -1467,6 +1509,7 @@ class LogRelay:
     """
 
     def __init__(self):
+        """Internal: init."""
         self.queue = collections.deque()
         self.dropped = 0
         self.wake = None
@@ -1485,6 +1528,7 @@ class LogRelay:
     # ---- feeding the queue
 
     def _push(self, line):
+        """Internal: push."""
         if len(self.queue) >= LOG_QUEUE_MAX:
             self.queue.popleft()
             self.dropped += 1
@@ -1493,6 +1537,7 @@ class LogRelay:
             self.wake.set()
 
     def add(self, prefix, text):
+        """Add."""
         if self.closed:
             return
         for raw in str(text).splitlines():
@@ -1504,6 +1549,7 @@ class LogRelay:
             self._push(f"[{prefix}]: {line}")
 
     def add_threadsafe(self, prefix, text):
+        """Add threadsafe."""
         loop = self.loop
         if loop is None or loop.is_closed():
             return
@@ -1520,6 +1566,7 @@ class LogRelay:
             pass  # loop closed while shutting down
 
     def separator(self, label):
+        """Separator."""
         if self.closed or not self.started:
             return
         self._push(f"-------- {label} ({time.strftime('%Y-%m-%d %H:%M:%S')}) --------")
@@ -1527,6 +1574,7 @@ class LogRelay:
     # ---- server session markers
 
     def poll_tail(self):
+        """Poll tail."""
         if self.tail is None:
             return
         for kind, text in self.tail.poll():
@@ -1560,6 +1608,7 @@ class LogRelay:
     # ---- lifecycle
 
     def start(self):
+        """Slash command: start the Minecraft server."""
         self.loop = asyncio.get_running_loop()
         self.wake = asyncio.Event()
         self.started = True
@@ -1584,6 +1633,7 @@ class LogRelay:
         )
 
     async def _tail_loop(self):
+        """Internal: tail loop."""
         while True:
             try:
                 self.poll_tail()
@@ -1592,6 +1642,7 @@ class LogRelay:
             await asyncio.sleep(LOG_TAIL_INTERVAL)
 
     async def _flush_loop(self):
+        """Internal: flush loop."""
         await bot.wait_until_ready()
         while True:
             if not self.queue:
@@ -1607,6 +1658,7 @@ class LogRelay:
                 await asyncio.sleep(5)
 
     async def _get_channel(self):
+        """Internal: get channel."""
         if self.channel is None:
             channel = bot.get_channel(LOG_CHANNEL_ID)
             if channel is None:
@@ -1615,12 +1667,14 @@ class LogRelay:
         return self.channel
 
     def _report_failure(self, message, *args):
+        """Internal: report failure."""
         now = time.monotonic()
         if now - self._last_error >= 300:
             self._last_error = now
             relay_log.error(message, *args)
 
     async def _send(self, text, count):
+        """Internal: send."""
         for attempt in (1, 2, 3):
             try:
                 channel = await self._get_channel()
@@ -1646,6 +1700,7 @@ class LogRelay:
         return False
 
     async def flush(self):
+        """Flush."""
         if self.dropped:
             skipped, self.dropped = self.dropped, 0
             self.add("mc-bot", f"{skipped} log lines were skipped (Discord was slow or unreachable)")
@@ -1662,6 +1717,7 @@ class LogRelay:
                 return
 
     async def shutdown(self):
+        """Shutdown."""
         if not self.started or self.closed:
             return
 
@@ -1693,6 +1749,7 @@ relay = LogRelay()
 
 
 def start_log_relay():
+    """Start the Minecraft log relay."""
     relay.start()
 
 
@@ -1700,6 +1757,7 @@ class AuditRelay:
     """Command audit lines for MC_AUDIT_CHANNEL_ID, separate from the log channel."""
 
     def __init__(self):
+        """Internal: init."""
         self.queue = collections.deque()
         self.wake = None
         self.loop = None
@@ -1711,6 +1769,7 @@ class AuditRelay:
         self.dropped = 0
 
     def add(self, text):
+        """Add."""
         if self.closed:
             return
         line = relay_clean(str(text)).strip()
@@ -1726,6 +1785,7 @@ class AuditRelay:
             self.wake.set()
 
     def add_threadsafe(self, text):
+        """Add threadsafe."""
         loop = self.loop
         if loop is None or loop.is_closed():
             return
@@ -1742,6 +1802,7 @@ class AuditRelay:
             pass
 
     def start(self):
+        """Slash command: start the Minecraft server."""
         self.loop = asyncio.get_running_loop()
         self.wake = asyncio.Event()
         self.started = True
@@ -1752,6 +1813,7 @@ class AuditRelay:
         log.info("Audit relay on: channel %s", AUDIT_CHANNEL_ID)
 
     async def _flush_loop(self):
+        """Internal: flush loop."""
         await bot.wait_until_ready()
         while True:
             if not self.queue:
@@ -1767,6 +1829,7 @@ class AuditRelay:
                 await asyncio.sleep(5)
 
     async def flush(self):
+        """Flush."""
         while self.queue:
             batch, size = [], 0
             while self.queue:
@@ -1802,12 +1865,14 @@ class AuditRelay:
                 return
 
     def _requeue_audit(self, batch, skipped):
+        """Internal: requeue audit."""
         if skipped:
             self.dropped += skipped
         for line in reversed(batch):
             self.queue.appendleft(line)
 
     async def shutdown(self):
+        """Shutdown."""
         if not self.started or self.closed:
             return
         self.closed = True
@@ -1825,6 +1890,7 @@ audit = AuditRelay()
 
 
 def start_audit_relay():
+    """Start the command-audit relay."""
     audit.start()
 
 
@@ -1845,10 +1911,12 @@ RCON_FRAGMENT_WAIT = 0.5    # how long to wait for another chunk after a full-si
 
 
 def strip_colors(text):
+    """Remove Minecraft color and formatting codes from text."""
     return COLOR_RE.sub("", text)
 
 
 class RconError(Exception):
+    """Raised when an RCON exchange fails."""
     pass
 
 
@@ -1889,6 +1957,7 @@ def describe_rcon_error(error):
 
 
 def _rcon_packet(pkt_id, ptype, body):
+    """Build an RCON packet."""
     payload = (
         pkt_id.to_bytes(4, "little", signed=True)
         + ptype.to_bytes(4, "little", signed=True)
@@ -1899,6 +1968,7 @@ def _rcon_packet(pkt_id, ptype, body):
 
 
 async def _rcon_read(reader):
+    """Read one RCON packet from a stream."""
     length = int.from_bytes(await reader.readexactly(4), "little", signed=True)
     if length < 10 or length > 65535:
         raise RconError(f"bad packet length {length}")
@@ -1925,11 +1995,13 @@ class Rcon:
     """
 
     def __init__(self):
+        """Internal: init."""
         self._reader = None
         self._writer = None
         self._lock = None
 
     def _drop(self):
+        """Internal: drop."""
         writer, self._reader, self._writer = self._writer, None, None
         if writer is not None:
             try:
@@ -1938,6 +2010,7 @@ class Rcon:
                 pass
 
     async def close(self):
+        """Close."""
         writer = self._writer
         self._drop()
         if writer is not None:
@@ -1947,6 +2020,7 @@ class Rcon:
                 pass
 
     async def _connect(self, timeout):
+        """Internal: connect."""
         reader, writer = await asyncio.wait_for(
             asyncio.open_connection(RCON_HOST, RCON_PORT), timeout
         )
@@ -1971,6 +2045,7 @@ class Rcon:
         log.info("RCON connected to %s:%s", RCON_HOST, RCON_PORT)
 
     async def _exchange(self, command, timeout, trace):
+        """Internal: exchange."""
         self._writer.write(_rcon_packet(2, RCON_COMMAND, command))
         await self._writer.drain()
         trace.sent = True
@@ -1997,6 +2072,7 @@ class Rcon:
         raise RconError("RCON reply too long")
 
     async def _run(self, command, timeout, expect_close):
+        """Internal: run."""
         for attempt in (0, 1):
             reused = self._writer is not None
             if not reused:
@@ -2037,6 +2113,7 @@ class Rcon:
         raise RconError("RCON retry failed")  # pragma: no cover
 
     async def command(self, command, expect_close=False, timeout=5.0):
+        """Command."""
         if self._lock is None:
             self._lock = asyncio.Lock()
 
@@ -2156,6 +2233,7 @@ async def startup_rcon_check():
 # ============================================================
 
 async def tmux_send(command: str):
+    """Send a literal line to the Minecraft tmux session."""
     # -l sends the text literally, so a command can never be read as a key
     # name, and -- stops a leading dash from being read as an option.
     try:
@@ -2177,6 +2255,7 @@ async def tmux_send(command: str):
 
 
 async def send_console(command, expect_close=False, timeout=5.0):
+    """Run a console command, preferring RCON and falling back to tmux."""
     if RCON_PASSWORD:
         try:
             output = await rcon.command(
@@ -2202,6 +2281,7 @@ async def send_console(command, expect_close=False, timeout=5.0):
 
 
 def command_is_idempotent(command):
+    """True if a console command is safe to retry."""
     first = command.split(" ", 1)[0].lower()
     if first.startswith("minecraft:"):
         first = first[len("minecraft:"):]
@@ -2277,6 +2357,7 @@ class AmbiguousServer(Exception):
     """More than one matching JVM: the bot refuses to guess which to control."""
 
     def __init__(self, pids):
+        """Internal: init."""
         super().__init__(f"multiple matching servers: {sorted(pids)}")
         self.pids = sorted(pids)
 
@@ -2296,6 +2377,7 @@ def _proc_snapshot(pid):
 
 
 def _cwd_matches(pid):
+    """Internal: cwd matches."""
     if not SERVER_DIR or not HAVE_PROC:
         return True
     try:
@@ -2317,6 +2399,7 @@ def _is_live_server(pid):
 
 
 def _scan_proc():
+    """Internal: scan proc."""
     try:
         names = os.listdir("/proc")
     except OSError:
@@ -2354,6 +2437,7 @@ def _scan_cwd_mismatch():
 
 
 async def warn_server_dir_mismatch():
+    """Warn server dir mismatch."""
     if not SERVER_DIR or not HAVE_PROC:
         return
     pids = await asyncio.to_thread(_scan_cwd_mismatch)
@@ -2387,6 +2471,7 @@ async def pid_is_live(pid):
 
 
 async def _pgrep_pids():
+    """Internal: pgrep pids."""
     try:
         proc = await asyncio.create_subprocess_exec(
             "pgrep", "-f", "--", SERVER_PATTERN,
@@ -2452,10 +2537,12 @@ async def find_server_pid(*, force=False):
 
 
 async def server_running(*, force=False):
+    """True if a matching Minecraft server process is running."""
     return (await find_server_pid(force=force)) is not None
 
 
 async def server_age(pid):
+    """Seconds the server process has been up, or None."""
     try:
         proc = await asyncio.create_subprocess_exec(
             "ps", "-o", "etimes=", "-p", str(pid),
@@ -2469,6 +2556,7 @@ async def server_age(pid):
 
 
 def read_sys_int(path):
+    """Read sys int."""
     try:
         with open(path, encoding="utf-8") as file:
             return int(file.read().strip())
@@ -2527,6 +2615,7 @@ def host_power_lines():
 
 
 def format_uptime(seconds):
+    """Format a duration in seconds as a human-readable string."""
     seconds = max(0, int(seconds))
     minutes = seconds // 60
     hours, minutes = divmod(minutes, 60)
@@ -2541,6 +2630,7 @@ def format_uptime(seconds):
 
 
 def format_bytes(num):
+    """Format bytes."""
     num = float(num)
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if num < 1024 or unit == "TB":
@@ -2550,6 +2640,7 @@ def format_bytes(num):
 
 
 def folder_size(path):
+    """Folder size."""
     total = 0
     for root, _dirs, files in os.walk(path):
         for name in files:
@@ -2580,6 +2671,7 @@ def disk_usage_text():
 
 
 def format_ram(kb):
+    """Format a kilobyte count as a human-readable size."""
     if kb is None:
         return "unavailable"
     if kb >= 1024 * 1024:
@@ -2590,6 +2682,7 @@ def format_ram(kb):
 
 
 def _proc_rss_kb(pid):
+    """Internal: proc rss kb."""
     try:
         with open(f"/proc/{pid}/status", "r", encoding="utf-8") as file:
             for line in file:
@@ -2601,6 +2694,7 @@ def _proc_rss_kb(pid):
 
 
 def _proc_ticks(pid):
+    """Internal: proc ticks."""
     try:
         with open(f"/proc/{pid}/stat", "r", encoding="utf-8") as file:
             rest = file.read().rsplit(")", 1)[1].split()
@@ -2610,6 +2704,7 @@ def _proc_ticks(pid):
 
 
 async def _ps_usage(pid):
+    """Internal: ps usage."""
     try:
         proc = await asyncio.create_subprocess_exec(
             "ps", "-o", "rss=,pcpu=", "-p", str(pid),
@@ -2647,6 +2742,7 @@ async def process_usage(pid):
 
 
 def process_cmdline(pid):
+    """Return the command line of a process."""
     try:
         with open(f"/proc/{pid}/cmdline", "rb") as file:
             raw = file.read()
@@ -2715,6 +2811,7 @@ def ram_pressure(rss_kb, memory, xmx_kb):
 
 
 def format_players(info):
+    """Format an (online, max) player tuple."""
     if info is None:
         return "Players: unavailable" if RCON_PASSWORD else "Players: RCON not configured"
     online, maximum = info
@@ -2726,6 +2823,7 @@ def format_players(info):
 # ============================================================
 
 async def launch_server():
+    """Start the Minecraft server via the configured start script."""
     # A new JVM must not inherit the excuse recorded for the process we stopped.
     clear_recent_stop()
     clear_controlled_stop()
@@ -2817,6 +2915,7 @@ def remove_legacy_dimension_folders():
 
 
 async def launch_or_report(msg):
+    """Start the server or report why it cannot be started."""
     # /start already checked, but a crash restart or a race must not exec the
     # script while Paper is up. The start script also exits immediately if the
     # tmux session still exists, which is exactly what a Paper 26 shutdown looks
@@ -2866,6 +2965,7 @@ class LogCursor:
     """
 
     def __init__(self, path=None):
+        """Internal: init."""
         self.path = path or LOG_PATH
         try:
             stat = os.stat(self.path)
@@ -2910,10 +3010,12 @@ class LogCursor:
         return self.start_pos if same else 0
 
     def tail(self, n=4):
+        """Tail."""
         return tail_lines(self.path, n, self.start_offset())
 
 
 def _read_tail(path, size):
+    """Internal: read tail."""
     try:
         with open(path, "rb") as file:
             file.seek(0, os.SEEK_END)
@@ -2978,6 +3080,7 @@ def log_shows_clean_stop():
 
 
 def tail_lines(path, n=6, start=0):
+    """Return the last n lines of a file, respecting a start offset."""
     try:
         size = os.path.getsize(path)
         with open(path, "rb") as file:
@@ -2993,11 +3096,13 @@ def tail_lines(path, n=6, start=0):
 
 
 def _clip(line, width=120):
+    """Internal: clip."""
     line = redact_ips(line).replace("```", "'''")
     return line if len(line) <= width else line[: width - 1] + "…"
 
 
 def failure_details(cursor=None, launch=None):
+    """Return recent log lines that explain a failed start or stop."""
     sections = []
 
     if launch:
@@ -3033,6 +3138,7 @@ def failure_details(cursor=None, launch=None):
 async def wait_for_state(
     msg, want_running, t0, working_text, done_text, timeout_text, timeout=None
 ):
+    """Poll until the server reaches the desired running state."""
     timeout = STOP_TIMEOUT if timeout is None else timeout
 
     while True:
@@ -3070,6 +3176,7 @@ async def wait_for_ready(
     last_stage = None
 
     async def fail(text):
+        """Fail."""
         await msg.set(text + failure_details(cursor, launch), force=True)
         return False
 
@@ -3178,6 +3285,7 @@ async def get_player_info():
 
 
 async def get_player_count():
+    """Return the number of online players, or None on failure."""
     info = await get_player_info()
     return None if info is None else info[0]
 
@@ -3190,28 +3298,34 @@ class IdleState:
     """Idle countdown. The clock only advances while the count is known."""
 
     def __init__(self):
+        """Internal: init."""
         self.reset()
 
     def reset(self):
+        """Reset."""
         self.since = None
         self.paused_at = None
         self.pause_noted = False
         self.status = None  # Status for the channel warning
 
     def elapsed(self, now):
+        """Elapsed."""
         if self.since is None:
             return 0
         paused = 0.0 if self.paused_at is None else now - self.paused_at
         return max(0, int(now - self.since - paused))
 
     def remaining(self, now):
+        """Remaining."""
         return max(0, IDLE_TIMEOUT - self.elapsed(now))
 
     def pause(self, now):
+        """Pause."""
         if self.since is not None and self.paused_at is None:
             self.paused_at = now
 
     def resume(self, now):
+        """Resume."""
         if self.paused_at is None:
             return
         if self.since is not None:
@@ -3224,10 +3338,12 @@ idle = IdleState()
 
 
 def format_remaining(remaining):
+    """Format remaining idle time."""
     return f"{remaining // 60}:{remaining % 60:02d}"
 
 
 def idle_text(remaining):
+    """Text for the idle-shutdown countdown."""
     return (
         "[!] **Minecraft server is empty.**\n"
         f"Server will shut down in **{format_remaining(remaining)}** "
@@ -3236,6 +3352,7 @@ def idle_text(remaining):
 
 
 async def get_idle_channel():
+    """Return the channel used for idle-shutdown warnings."""
     if not IDLE_CHANNEL_ID:
         return None
 
@@ -3250,6 +3367,7 @@ async def get_idle_channel():
 
 
 async def ensure_idle_message(now):
+    """Create or update the idle-shutdown countdown message."""
     if idle.status is not None and idle.status.alive:
         return True
 
@@ -3268,6 +3386,7 @@ async def ensure_idle_message(now):
 
 
 async def cancel_idle_shutdown(reason="A player joined."):
+    """Cancel a pending idle shutdown."""
     log.info("Idle shutdown cancelled: %s", reason)
     warning = idle.status
     idle.reset()
@@ -3276,6 +3395,7 @@ async def cancel_idle_shutdown(reason="A player joined."):
 
 
 async def idle_offline():
+    """Clear idle state when the server goes offline."""
     warning = idle.status
     idle.reset()
     if warning is not None:
@@ -3283,6 +3403,7 @@ async def idle_offline():
 
 
 async def note_idle_pause(now):
+    """Record that the idle countdown is paused."""
     if idle.since is None:
         return
 
@@ -3299,6 +3420,7 @@ async def note_idle_pause(now):
 
 
 async def run_idle_shutdown():
+    """Shut the server down after the idle timeout."""
     if not try_lock("idle-shutdown"):
         return
 
@@ -3424,6 +3546,7 @@ TPSLOG_MAX = 20
 
 
 async def tmux_capture():
+    """Tmux capture."""
     try:
         proc = await asyncio.create_subprocess_exec(
             "tmux", "capture-pane", "-p", "-J", "-t", MC_SESSION, "-S", "-500",
@@ -3471,14 +3594,17 @@ async def _metric(command, pattern, timeout=6.0):
 
 
 async def get_tps(timeout=6.0):
+    """Query the server TPS via RCON."""
     return await _metric("tps", TPS_RE, timeout)
 
 
 async def get_mspt(timeout=6.0):
+    """Query the server MSPT via RCON."""
     return await _metric("mspt", MSPT_RE, timeout)
 
 
 def fmt_tps(labels, values):
+    """Fmt tps."""
     names = [part.strip() for part in labels.split(",")]
     nums = [part.strip() for part in values.split(",")]
     return " | ".join(f"{name}: {value}" for name, value in zip(names, nums))
@@ -3489,6 +3615,7 @@ def fmt_tps(labels, values):
 # ============================================================
 
 async def send_alert(text=None, allow_mentions=False, embed=None):
+    """Post a message or embed to the alert channel."""
     content = clip_discord(calm(text)) if text else None
     summary = content or (embed.title if embed is not None else "")
     log.info("Alert: %s", one_line(summary))
@@ -3547,6 +3674,7 @@ async def say_bot(text):
 
 
 async def auto_restart():
+    """Restart the server after an unexpected stop, within limits."""
     if AUTO_RESTART_MAX <= 0:
         log.info("Auto-restart is off (MC_AUTO_RESTART_MAX=0).")
         return
@@ -3691,10 +3819,12 @@ async def handle_unexpected_stop(dead_pid=None, force_crash=False):
 # ============================================================
 
 def new_monitor_state():
+    """New monitor state."""
     return SimpleNamespace(last_running=None, last_ambiguous=None, last_pid=None)
 
 
 async def monitor_tick(state):
+    """One monitor cycle: detect start/stop/crash and idle state."""
     try:
         pid = await find_server_pid(force=True)
     except AmbiguousServer as error:
@@ -3815,6 +3945,7 @@ async def monitor_tick(state):
 
 
 async def monitor_loop():
+    """Background loop that watches the server process."""
     await bot.wait_until_ready()
     state = new_monitor_state()
 
@@ -3844,7 +3975,9 @@ CPU_COUNT = os.cpu_count() or 1
 
 
 class HealthState:
+    """Tracks health-alert state for the current server process."""
     def __init__(self):
+        """Internal: init."""
         self.tps_supported = True
         self.last_message = -1e9
         self.alerting = False
@@ -3927,6 +4060,7 @@ async def health_probe(state):
 
 
 def health_stats(pid_age, probe, rss_kb, cpu, cpu_total, memory, players, xmx_kb=None):
+    """Health stats."""
     lines = [
         "TPS: " + (probe.tps_text or "unavailable"),
         format_players(players),
@@ -3963,6 +4097,7 @@ def health_stats(pid_age, probe, rss_kb, cpu, cpu_total, memory, players, xmx_kb
 
 
 async def health_tick():
+    """One health check: RAM, TPS, stuck RCON."""
     state = hstate
     try:
         pid = await find_server_pid()
@@ -4085,6 +4220,7 @@ async def close_health_incident(state, reason, stats=None):
 
 
 async def health_loop():
+    """Background loop that runs health checks."""
     await bot.wait_until_ready()
     while True:
         try:
@@ -4102,6 +4238,7 @@ async def health_loop():
 
 @bot.event
 async def on_ready():
+    """Discord on_ready: log in and start background tasks once."""
     log.info("Logged in as %s. MC Server Manager %s is online.", bot.user, VERSION)
     if getattr(bot, "_announced", False):
         return
@@ -4151,6 +4288,7 @@ COMMANDS = (
 
 
 def online_embed():
+    """Build the bot-online embed."""
     embed = discord.Embed(
         title=f"Bot online {VERSION}",
         description=f"Version {VERSION}. The bot is up. The Minecraft server was left as it was.",
@@ -4162,6 +4300,7 @@ def online_embed():
 
 
 async def announce_online():
+    """Post that the bot has come online."""
     channel_id = ALERT_CHANNEL_ID or LOG_CHANNEL_ID
     if not channel_id:
         log.info("No alert or log channel, so the online message was not posted.")
@@ -4177,12 +4316,14 @@ async def announce_online():
 
 @bot.event
 async def on_app_command_completion(interaction, command):
+    """Audit successful slash commands."""
     elapsed = (discord.utils.utcnow() - interaction.created_at).total_seconds()
     cmd_log.info("/%s finished in %.1fs", command.qualified_name, elapsed)
 
 
 @bot.tree.error
 async def on_app_command_error(interaction, error):
+    """Log and reply when a slash command fails."""
     original = getattr(error, "original", error)
     log.error(
         "Command %s failed for %s: %r",
@@ -4220,6 +4361,7 @@ COLOR_INFO = 0x3E5166
 
 
 def panel(title, lines, color=COLOR_INFO, footer=None):
+    """Build a Discord embed panel."""
     embed = discord.Embed(title=title, color=color, timestamp=discord.utils.utcnow())
     body = "\n".join(line for line in lines if line)
     embed.description = body or "\u200b"
@@ -4229,6 +4371,7 @@ def panel(title, lines, color=COLOR_INFO, footer=None):
 
 @bot.tree.command(name="status", description="Check the Minecraft server status")
 async def status(interaction: discord.Interaction):
+    """Slash command: show whether the server is running."""
     if not await gate(interaction):
         return
     await interaction.response.defer()
@@ -4263,6 +4406,7 @@ async def status(interaction: discord.Interaction):
 @bot.tree.command(name="start", description="Start the Minecraft server")
 @managed("start")
 async def start(interaction: discord.Interaction):
+    """Slash command: start the Minecraft server."""
     msg = await open_status(interaction, "[.] Starting Minecraft server...")
 
     if await server_running(force=True):
@@ -4290,6 +4434,7 @@ async def start(interaction: discord.Interaction):
 
 
 async def run_stop(interaction):
+    """Run stop."""
     msg = await open_status(interaction, "[.] Stopping Minecraft server...")
 
     if not await server_running(force=True):
@@ -4323,6 +4468,7 @@ async def run_stop(interaction):
 
 
 async def run_restart(interaction):
+    """Run restart."""
     msg = await open_status(interaction, "[.] Restarting Minecraft server...")
     await cancel_idle_shutdown("Server restart requested.")
 
@@ -4378,6 +4524,7 @@ class ConfirmView(discord.ui.View):
     """Yes/Cancel buttons that only the person who ran the command can press."""
 
     def __init__(self, user, op, runner):
+        """Internal: init."""
         super().__init__(timeout=CONFIRM_TIMEOUT)
         self.user = user
         self.op = op
@@ -4390,6 +4537,7 @@ class ConfirmView(discord.ui.View):
                 child.label = "Stop server" if op == "stop" else "Restart server"
 
     async def interaction_check(self, interaction):
+        """Interaction check."""
         if interaction.user.id != self.user.id:
             await interaction.response.send_message(
                 f"Only {self.user.display_name} can confirm this.", ephemeral=False
@@ -4398,6 +4546,7 @@ class ConfirmView(discord.ui.View):
         return await gate(interaction)
 
     async def invalidate(self, reason):
+        """Invalidate."""
         if self.done:
             return
         self.done = True
@@ -4415,6 +4564,7 @@ class ConfirmView(discord.ui.View):
 
     @discord.ui.button(label="Yes, do it", style=discord.ButtonStyle.danger)
     async def yes(self, interaction, button):
+        """Yes."""
         if self.done:
             await interaction.response.send_message(
                 "That confirmation is already closed.", ephemeral=False
@@ -4445,6 +4595,7 @@ class ConfirmView(discord.ui.View):
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def no(self, interaction, button):
+        """No."""
         if self.done:
             await interaction.response.send_message(
                 "That confirmation is already closed.", ephemeral=False
@@ -4459,6 +4610,7 @@ class ConfirmView(discord.ui.View):
         )
 
     async def on_timeout(self):
+        """On timeout."""
         if self.done:
             return
         self.done = True
@@ -4517,6 +4669,7 @@ async def ask_confirm(interaction, op, title, runner):
 
 @bot.tree.command(name="stop", description="Stop the Minecraft server")
 async def stop(interaction: discord.Interaction):
+    """Slash command: stop the Minecraft server."""
     if not await gate(interaction):
         return
     if _stress_running:
@@ -4527,6 +4680,7 @@ async def stop(interaction: discord.Interaction):
 
 @bot.tree.command(name="restart", description="Restart the Minecraft server")
 async def restart(interaction: discord.Interaction):
+    """Slash command: restart the Minecraft server."""
     if not await gate(interaction):
         return
     if _stress_running:
@@ -4586,12 +4740,14 @@ def backup_should_run(seconds, after, offline, busy, held, failed_recently):
 
 
 def backup_metric_seconds():
+    """Backup metric seconds."""
     if AUTO_BACKUP_METRIC == "playtime":
         return float(_backup_state["playtime"])
     return float(_backup_state["uptime"])
 
 
 def load_backup_state():
+    """Load persisted backup counters."""
     try:
         with open(BACKUP_STATE_PATH, encoding="utf-8") as file:
             raw = json.load(file)
@@ -4620,6 +4776,7 @@ def load_backup_state():
 
 
 def save_backup_state():
+    """Persist backup counters."""
     global _backup_state_saved_at
     _backup_state_saved_at = time.monotonic()
     tmp = BACKUP_STATE_PATH + ".tmp"
@@ -4634,6 +4791,7 @@ def save_backup_state():
 
 
 def note_backup_success():
+    """Record a successful backup."""
     _backup_state["uptime"] = 0.0
     _backup_state["playtime"] = 0.0
     _backup_state["last_backup"] = time.time()
@@ -4644,6 +4802,7 @@ def note_backup_success():
 
 
 def backup_status_line():
+    """One-line summary of backup state."""
     seconds = backup_metric_seconds()
     skips = backup_intervals_due(seconds, AUTO_BACKUP_AFTER)
     kind = "playtime" if AUTO_BACKUP_METRIC == "playtime" else "uptime"
@@ -4736,6 +4895,7 @@ def _copy_into(src, dest_dir):
     skip = {os.path.realpath(BACKUP_DIR)} if BACKUP_DIR else set()
 
     def ignore(directory, names):
+        """Ignore."""
         dropped = []
         for item in names:
             full = os.path.realpath(os.path.join(directory, item))
@@ -4792,6 +4952,7 @@ async def perform_backup(kind):
 
 
 def backup_restart_hold():
+    """Backup restart hold."""
     return time.monotonic() < backup_hold_until
 
 
@@ -4901,6 +5062,7 @@ async def auto_backup_if_due():
         return
 
     async def run():
+        """Run."""
         kind = "playtime" if AUTO_BACKUP_METRIC == "playtime" else "uptime"
         try:
             try:
@@ -4959,6 +5121,7 @@ load_backup_state()
 @bot.tree.command(name="save", description="Save the world with save-all flush")
 @managed("save")
 async def save(interaction: discord.Interaction):
+    """Slash command: save the world."""
     if _stress_running:
         await deny(interaction, "Cannot save during a test. Changes are not kept.")
         return
@@ -5012,6 +5175,7 @@ async def run_shell(command, timeout, env=None):
     tail = b""
 
     async def pump():
+        """Pump."""
         nonlocal tail
         while True:
             chunk = await proc.stdout.read(4096)
@@ -5054,6 +5218,7 @@ def mark_autosave_off():
 
 
 def clear_autosave_marker():
+    """Remove the autosave-in-progress marker."""
     try:
         os.remove(AUTOSAVE_MARKER)
     except OSError:
@@ -5276,7 +5441,9 @@ async def run_text_start(who, reply):
         await cancel_idle_shutdown("!start")
 
         class ReplyStatus:
+            """Helper that updates a Discord reply while an operation runs."""
             async def set(self, text, force=False):
+                """Set."""
                 await reply(text)
 
         if not await wait_until_fully_stopped(ReplyStatus()):
@@ -5317,6 +5484,7 @@ def game_port():
 
 
 def _varint(value):
+    """Internal: varint."""
     out = bytearray()
     while True:
         byte = value & 0x7F
@@ -5329,11 +5497,13 @@ def _varint(value):
 
 
 def _mc_string(text):
+    """Internal: mc string."""
     raw = text.encode("utf-8")
     return _varint(len(raw)) + raw
 
 
 def _packet(packet_id, payload):
+    """Internal: packet."""
     body = bytes([packet_id]) + payload
     return _varint(len(body)) + body
 
@@ -5360,6 +5530,7 @@ def login_kick_packet(text):
 
 
 async def _read_varint(reader):
+    """Internal: read varint."""
     value = 0
     for shift in range(0, 35, 7):
         raw = await reader.readexactly(1)
@@ -5381,6 +5552,7 @@ async def handshake_intent(reader):
     pos = 0
 
     def take():
+        """Take."""
         nonlocal pos
         value = 0
         for shift in range(0, 35, 7):
@@ -5405,6 +5577,7 @@ _wake_holds = 0
 
 
 async def close_wake_listener():
+    """Close wake listener."""
     global _wake_server
     server = _wake_server
     _wake_server = None
@@ -5414,6 +5587,7 @@ async def close_wake_listener():
 
 
 async def _pipe(reader, writer):
+    """Internal: pipe."""
     try:
         while True:
             data = await reader.read(65536)
@@ -5431,6 +5605,7 @@ async def _pipe(reader, writer):
 
 
 async def handle_wake(reader, writer):
+    """Wake the server when a player tries to join while it is off."""
     peer = writer.get_extra_info("peername")
     who = peer[0] if peer else "unknown"
     try:
@@ -5495,6 +5670,7 @@ async def hold_join(reader, writer, raw, who):
     client_gone = False
 
     async def soak():
+        """Soak."""
         nonlocal client_gone
         try:
             while True:
@@ -5532,6 +5708,7 @@ async def hold_join(reader, writer, raw, who):
         up_reader, up_writer = upstream
 
         async def client_to_server():
+            """Client to server."""
             while True:
                 item = await queue.get()
                 if not item:
@@ -5571,6 +5748,7 @@ async def wake_start(who):
     notes = []
 
     async def reply(text):
+        """Reply."""
         notes.append(text)
         # Do not wait on Discord. A slow or dead link must not stall the held join.
         spawn(send_alert(f"Join from `{who}`: {text}"))
@@ -5627,6 +5805,7 @@ async def chat_start(player):
 
 @bot.event
 async def on_message(message):
+    """Handle Discord messages (chat relay and in-game !commands)."""
     if (message.author.bot and message.webhook_id is None) or message.guild is None:
         return
     if GUILD_ID and message.guild.id != GUILD_ID:
@@ -5636,6 +5815,7 @@ async def on_message(message):
     who = message.author.display_name
 
     async def reply(text):
+        """Reply."""
         await message.channel.send(text)
 
     await run_text_start(who, reply)
@@ -5834,7 +6014,9 @@ def restore_backup_folder(folder):
 
 
 class RestoreView(discord.ui.View):
+    """Discord view for choosing a backup to restore."""
     def __init__(self, user_id, choices):
+        """Internal: init."""
         super().__init__(timeout=120)
         self.user_id = user_id
         self.choices = {str(serial): (name, path) for serial, _number, name, path in choices}
@@ -5849,6 +6031,7 @@ class RestoreView(discord.ui.View):
         self.add_item(RestoreSelect(options))
 
     async def interaction_check(self, interaction):
+        """Interaction check."""
         if interaction.user.id != self.user_id:
             await interaction.response.send_message(
                 "Only the person who ran /backup can choose.", ephemeral=False
@@ -5858,6 +6041,7 @@ class RestoreView(discord.ui.View):
 
     @discord.ui.button(label="Close", style=discord.ButtonStyle.secondary, row=2)
     async def close(self, interaction, button):
+        """Close."""
         if interaction.user.id != self.user_id:
             await interaction.response.send_message(
                 "Only the person who ran /backup can close this.", ephemeral=False
@@ -5868,10 +6052,13 @@ class RestoreView(discord.ui.View):
 
 
 class RestoreSelect(discord.ui.Select):
+    """Select menu of available backups for restore."""
     def __init__(self, options):
+        """Internal: init."""
         super().__init__(placeholder="Choose a backup to restore", options=options)
 
     async def callback(self, interaction):
+        """Callback."""
         serial = self.values[0]
         name, path = self.view.choices[serial]
         if await server_running():
@@ -5907,7 +6094,9 @@ class RestoreSelect(discord.ui.Select):
 
 
 class DeleteView(discord.ui.View):
+    """Discord view for choosing a backup to delete."""
     def __init__(self, user_id, choices):
+        """Internal: init."""
         super().__init__(timeout=120)
         self.user_id = user_id
         self.choices = {str(serial): (name, path) for serial, _number, name, path in choices}
@@ -5922,6 +6111,7 @@ class DeleteView(discord.ui.View):
         self.add_item(DeleteSelect(options))
 
     async def interaction_check(self, interaction):
+        """Interaction check."""
         if interaction.user.id != self.user_id:
             await interaction.response.send_message(
                 "Only the person who ran /backup can delete.", ephemeral=False
@@ -5931,6 +6121,7 @@ class DeleteView(discord.ui.View):
 
     @discord.ui.button(label="Close", style=discord.ButtonStyle.secondary, row=2)
     async def close(self, interaction, button):
+        """Close."""
         if interaction.user.id != self.user_id:
             await interaction.response.send_message(
                 "Only the person who ran /backup can close this.", ephemeral=False
@@ -5941,10 +6132,13 @@ class DeleteView(discord.ui.View):
 
 
 class KeepSelect(discord.ui.Select):
+    """Select menu to mark a backup as kept (skip auto-delete)."""
     def __init__(self, options):
+        """Internal: init."""
         super().__init__(placeholder="Keep a backup from auto-delete", options=options)
 
     async def callback(self, interaction):
+        """Callback."""
         serial = self.values[0]
         name, path = self.view.choices[serial]
         marker = os.path.join(path, ".keep")
@@ -5970,10 +6164,13 @@ class KeepSelect(discord.ui.Select):
 
 
 class DeleteSelect(discord.ui.Select):
+    """Select menu of backups that can be deleted."""
     def __init__(self, options):
+        """Internal: init."""
         super().__init__(placeholder="Delete a backup", options=options)
 
     async def callback(self, interaction):
+        """Callback."""
         serial = self.values[0]
         name, path = self.view.choices[serial]
         if not try_lock("backup-delete"):
@@ -6006,6 +6203,7 @@ class DeleteSelect(discord.ui.Select):
     app_commands.Choice(name="restore", value="restore"),
 ])
 async def backup(interaction: discord.Interaction, action: str):
+    """Slash command: make, list, restore, or delete backups."""
     if not await gate(interaction):
         return
     # make is open to members; looking at or restoring backups is admin only.
@@ -6112,6 +6310,7 @@ _map_running = False
 
 
 def _read_payload(data, kind, pos):
+    """Internal: read payload."""
     if kind == 1:
         return int.from_bytes(data[pos:pos + 1], "big", signed=True), pos + 1
     if kind == 2:
@@ -6160,6 +6359,7 @@ def _read_payload(data, kind, pos):
 
 
 def read_nbt(data):
+    """Read an NBT compound."""
     if data[:2] == b"\x1f\x8b":
         data = gzip.decompress(data)
     kind = data[0]
@@ -6183,6 +6383,7 @@ def world_spawn(level_dat):
 
 
 def default_center():
+    """Return the default map center (spawn)."""
     return world_spawn(os.path.join(world_dir(), "level.dat"))
 
 
@@ -6433,6 +6634,7 @@ MAP_STYLE = 5
 
 
 def _biome_pick(table, key, default):
+    """Internal: biome pick."""
     for word, color in table:
         if word in key:
             return color
@@ -6501,6 +6703,7 @@ def chunk_columns(root, dimension="overworld"):
         biomes[section["Y"]] = (bnames, raw.get("data") or [])
 
     def block_at(local, y):
+        """Block at."""
         names, data = sections.get(y >> 4, ((), ()))
         if not names:
             return "minecraft:air"
@@ -6516,6 +6719,7 @@ def chunk_columns(root, dimension="overworld"):
         return names[value] if value < len(names) else names[0]
 
     def biome_at(local, y):
+        """Biome at."""
         names, data = biomes.get(y >> 4, ((), ()))
         if not names:
             return ""
@@ -6594,7 +6798,9 @@ def chunk_columns(root, dimension="overworld"):
 
 
 def png_bytes(width, height, rgb):
+    """Encode raw RGB pixels as PNG bytes."""
     def chunk(tag, payload):
+        """Chunk."""
         crc = zlib.crc32(tag + payload) & 0xFFFFFFFF
         return struct.pack(">I", len(payload)) + tag + payload + struct.pack(">I", crc)
 
@@ -6609,6 +6815,7 @@ def png_bytes(width, height, rgb):
 
 
 def region_dir_for(dimension):
+    """Return the region directory for a dimension, or None."""
     base = world_dir()
     folders = {
         "overworld": (
@@ -6631,6 +6838,7 @@ def region_dir_for(dimension):
 
 
 def _dot(pixels, size, x, y, color, span=2):
+    """Internal: dot."""
     for dy in range(-span, span + 1):
         for dx in range(-span, span + 1):
             px, py = x + dx, y + dy
@@ -6640,6 +6848,7 @@ def _dot(pixels, size, x, y, color, span=2):
 
 
 def _compass(pixels, size):
+    """Internal: compass."""
     cx = size // 2
     for y, row in enumerate((
         (0, 1, 0, 1, 0),
@@ -6777,6 +6986,7 @@ def render_map(center_x, center_z, radius, dimension="overworld", zoom=1, marker
 
 
 def parse_pos(text):
+    """Parse an entity Pos NBT string into coordinates."""
     numbers = re.findall(r"-?\d+(?:\.\d+)?", text or "")
     if len(numbers) < 3:
         return None
@@ -6813,6 +7023,7 @@ async def world_map(
     dimension: typing.Optional[app_commands.Choice[str]] = None,
     zoom: typing.Optional[app_commands.Choice[int]] = None,
 ):
+    """Render a top-down map image."""
     global _map_running
     if not await gate(interaction):
         return
@@ -6883,6 +7094,7 @@ _tps_graph_running = False
 
 
 async def tps_sample_loop():
+    """Tps sample loop."""
     while True:
         try:
             result = await get_tps()
@@ -6892,6 +7104,7 @@ async def tps_sample_loop():
                 names = [part.strip() for part in labels.split(",")]
                 nums = [part.strip() for part in values.split(",")]
                 def tps_number(raw):
+                    """Tps number."""
                     # Paper prefixes a bad reading with *, so "*19.5" must still parse.
                     match = re.search(r"[0-9]+(?:\.[0-9]+)?", raw or "")
                     return float(match.group(0)) if match else None
@@ -6909,6 +7122,7 @@ async def tps_sample_loop():
 
 
 async def tps_graph_follow(message, seconds):
+    """Tps graph follow."""
     global _tps_graph_running
     deadline = time.monotonic() + seconds
     try:
@@ -6945,6 +7159,7 @@ def tps_chart(window, title):
     pixels = bytearray([18, 22, 28]) * (width * height)
 
     def put(x, y, color):
+        """Put."""
         if 0 <= x < width and 0 <= y < height:
             pos = (y * width + x) * 3
             pixels[pos:pos + 3] = bytes(color)
@@ -6986,6 +7201,7 @@ INHABITED_LIMIT = 200  # ticks. About 10 seconds in a chunk counts as touched.
 
 
 def chunk_inhabited(root):
+    """Return a chunk's InhabitedTime."""
     try:
         return int(root.get("InhabitedTime", 0))
     except (TypeError, ValueError):
@@ -6993,6 +7209,7 @@ def chunk_inhabited(root):
 
 
 def _nibble(raw, x, y, z):
+    """Read a 4-bit light value from a nibble array."""
     if not isinstance(raw, (bytes, bytearray)) or len(raw) < 2048:
         return None
     index = ((y & 15) << 8) | ((z & 15) << 4) | (x & 15)
@@ -7095,6 +7312,7 @@ SAFE_SKIP = {
 
 
 def safe_block(name):
+    """Return a block id if it is safe to overwrite, else None."""
     name = name if ":" in name else f"minecraft:{name}"
     if name in SAFE_SKIP or name.endswith("_chest") or name.endswith("_door") or name.endswith("_bed"):
         return None
@@ -7102,6 +7320,7 @@ def safe_block(name):
 
 
 async def restore_blocks(placed):
+    """Restore blocks that were temporarily changed."""
     left = []
     for x, y, z, original in placed:
         ok, _out = await send_console(f"setblock {x} {y} {z} {original}", timeout=4)
@@ -7201,6 +7420,7 @@ async def tailscale_peers():
 
 
 async def tailscale_ip():
+    """Return this machine's Tailscale IPv4, or None."""
     try:
         proc = await asyncio.create_subprocess_exec(
             "tailscale", "ip", "-4",
@@ -7225,6 +7445,7 @@ async def network_burst():
     else:
         targets.append(("tailscale", None))
     async def sample(label, host):
+        """Sample."""
         if not host:
             return f"{label}: no peer online"
         results = await asyncio.gather(*(ping_once(host) for _ in range(12)))
@@ -7240,6 +7461,7 @@ async def network_burst():
 
 
 async def health_snapshot():
+    """Collect a one-line health summary for the stress log."""
     pid = await find_server_pid()
     if pid is None:
         return ["server offline"]
@@ -7264,6 +7486,7 @@ class StressView(discord.ui.View):
     """Persistent Stop button. custom_id keeps it alive past 15 minutes."""
 
     def __init__(self, stop_event):
+        """Internal: init."""
         super().__init__(timeout=None)
         self.stop_event = stop_event
 
@@ -7273,6 +7496,7 @@ class StressView(discord.ui.View):
         custom_id="stresstest:stop",
     )
     async def stop_test(self, interaction, button):
+        """Stop test."""
         if not member_is_admin(interaction):
             await deny(interaction, "Only an admin can stop the test.")
             return
@@ -7311,6 +7535,7 @@ def stress_graph(tps_points, ping_points):
     pixels = bytearray(bytes((16, 18, 22)) * (width * height))
 
     def put(x, y, color):
+        """Put."""
         if 0 <= x < width and 0 <= y < height:
             i = (y * width + x) * 3
             pixels[i:i + 3] = bytes(color)
@@ -7329,6 +7554,7 @@ def stress_graph(tps_points, ping_points):
             put(x, y, (36, 40, 46))
 
     def series(points, scale, color):
+        """Series."""
         usable = [(stamp, value) for stamp, value in points if value is not None]
         if len(usable) < 2:
             return
@@ -7356,10 +7582,12 @@ class PanelStatus:
     """Lets wait_for_state update the stress panel."""
 
     def __init__(self, message, view):
+        """Internal: init."""
         self.message = message
         self.view = view
 
     async def set(self, text, force=False):
+        """Set."""
         try:
             await self.message.edit(
                 embed=panel("Stress test", [text], COLOR_WAIT),
@@ -7370,6 +7598,7 @@ class PanelStatus:
 
 
 async def stress_stop_server(status):
+    """Stop the server cleanly during a stress test."""
     if not await server_running(force=True):
         return True
     await save_world()
@@ -7386,6 +7615,7 @@ async def stress_stop_server(status):
 
 
 async def tmux_session_exists():
+    """True if the Minecraft tmux session exists."""
     try:
         proc = await asyncio.create_subprocess_exec(
             "tmux", "has-session", "-t", MC_SESSION,
@@ -7398,6 +7628,7 @@ async def tmux_session_exists():
 
 
 async def kill_tmux_session():
+    """Kill the Minecraft tmux session."""
     try:
         proc = await asyncio.create_subprocess_exec(
             "tmux", "kill-session", "-t", MC_SESSION,
@@ -7432,6 +7663,7 @@ async def wait_until_fully_stopped(status, timeout=90):
 
 
 async def stress_start_server(status):
+    """Start the server after a stress-test restore."""
     if not await wait_until_fully_stopped(status):
         await status.set("The old server did not finish shutting down.")
         return False
@@ -7586,6 +7818,7 @@ async def stress_warn():
 @bot.tree.command(name="stresstest", description="Multi-dimension load test (overworld/nether/end), network, and health log")
 @app_commands.describe(minutes="Minutes. Default 20, maximum 300")
 async def stresstest(interaction: discord.Interaction, minutes: typing.Optional[int] = 20):
+    """Slash command: multi-dimension load test with snapshot/restore."""
     global _stress_running
     if not await gate(interaction, admin=True):
         return
@@ -7746,6 +7979,7 @@ async def stresstest(interaction: discord.Interaction, minutes: typing.Optional[
 
 @bot.tree.command(name="health", description="TPS, players, uptime, RAM, CPU, battery, and power")
 async def health(interaction: discord.Interaction):
+    """Slash command: show TPS, players, RAM, CPU, and host stats."""
     if not await gate(interaction):
         return
     await interaction.response.defer()
@@ -7782,6 +8016,7 @@ async def health(interaction: discord.Interaction):
 
 @bot.tree.command(name="players", description="Show who is online")
 async def players(interaction: discord.Interaction):
+    """Slash command: list online players."""
     if not await gate(interaction):
         return
     if not RCON_PASSWORD:
@@ -7807,18 +8042,21 @@ async def players(interaction: discord.Interaction):
 
 
 def fmt_metric(kind, result):
+    """Format a TPS or MSPT result."""
     if result is None:
         return f"{kind}: unavailable"
     return f"{kind}: {fmt_tps(*result)}"
 
 
 async def tps_mspt_lines():
+    """Return current TPS and MSPT lines."""
     tps_result, mspt_result = await asyncio.gather(get_tps(), get_mspt())
     return [fmt_metric("TPS", tps_result), fmt_metric("MSPT", mspt_result)]
 
 
 @bot.tree.command(name="tps", description="Show current server TPS and MSPT")
 async def tps(interaction: discord.Interaction):
+    """Slash command: show current TPS and MSPT."""
     if not await gate(interaction):
         return
     await interaction.response.defer()
@@ -7850,6 +8088,7 @@ async def tps(interaction: discord.Interaction):
 # ============================================================
 
 def clean_chat(text, limit):
+    """Sanitize text before sending it to Minecraft chat."""
     text = text.replace("§", "")  # no formatting-code injection
     text = re.sub(r"[\x00-\x1f\x7f]+", " ", text)  # CR/LF and other controls
     text = re.sub(r"\s+", " ", text).strip()
@@ -7859,6 +8098,7 @@ def clean_chat(text, limit):
 @bot.tree.command(name="say", description="Send a message to Minecraft chat")
 @app_commands.describe(message="What to say in game")
 async def say(interaction: discord.Interaction, message: str):
+    """Slash command: send a message into Minecraft chat."""
     if not await gate(interaction):
         return
     if not RCON_PASSWORD:
@@ -7919,10 +8159,12 @@ STAT_LABELS = {
 
 
 def server_root():
+    """Return the Minecraft server root directory."""
     return SERVER_DIR or os.path.dirname(os.path.dirname(LOG_PATH))
 
 
 def safe_level_name(name):
+    """Sanitize a level-name so it cannot escape the server root."""
     name = str(name or "").strip()
     if (
         not name
@@ -7936,11 +8178,13 @@ def safe_level_name(name):
 
 
 def safe_player_uuid(value):
+    """Return a lowercase UUID if valid, else None."""
     text = str(value or "")
     return text.lower() if UUID_RE.fullmatch(text) else None
 
 
 def world_dir():
+    """Return the path to the current world directory."""
     level = "world"
     try:
         _, found, _encoding = props_load()
@@ -7951,6 +8195,7 @@ def world_dir():
 
 
 def lookup_uuid(name):
+    """Look up a player UUID from usercache.json."""
     path = os.path.join(server_root(), "usercache.json")
     try:
         with open(path, "r", encoding="utf-8") as file:
@@ -7965,6 +8210,7 @@ def lookup_uuid(name):
 
 
 def nbt_number(text):
+    """Extract a number from an NBT value string."""
     match = NBT_NUMBER_RE.search(text or "")
     if not match:
         return None
@@ -7973,6 +8219,7 @@ def nbt_number(text):
 
 
 def parse_items(text):
+    """Parse an inventory NBT string into item counts."""
     counts = {}
     for match in ITEM_RE.finditer(text or ""):
         item = match.group(1) or match.group(3)
@@ -7987,6 +8234,7 @@ def parse_items(text):
 
 
 def format_stat(key, value):
+    """Format a single stat value for display."""
     if key.endswith("_one_cm"):
         meters = value / 100
         return f"{meters / 1000:.2f} km" if meters >= 1000 else f"{meters:.0f} m"
@@ -7997,6 +8245,7 @@ def format_stat(key, value):
 
 
 def read_player_stats(uuid):
+    """Load a player's stats JSON, or None if missing/invalid."""
     uuid = safe_player_uuid(uuid)
     if not uuid:
         return None
@@ -8015,6 +8264,7 @@ def read_player_stats(uuid):
 
 
 def stat_lines(stats, section, limit=8):
+    """Format the top entries of a stats section."""
     block = stats.get(section) or {}
     ranked = sorted(block.items(), key=lambda item: item[1], reverse=True)[:limit]
     if not ranked:
@@ -8025,6 +8275,7 @@ def stat_lines(stats, section, limit=8):
 
 
 def custom_stat_lines(stats):
+    """Format selected custom stats for a player."""
     block = stats.get("minecraft:custom") or {}
     lines = []
     for key, label in STAT_LABELS.items():
@@ -8034,6 +8285,7 @@ def custom_stat_lines(stats):
 
 
 async def entity_data(player, path):
+    """Fetch an entity NBT path via RCON."""
     output = await rcon.command(f"data get entity {player} {path}", timeout=8)
     clean = strip_colors(output).strip()
     if "No entity was found" in clean or "unknown" in clean.lower():
@@ -8042,6 +8294,7 @@ async def entity_data(player, path):
 
 
 def stats_embeds(player, live, stats, online):
+    """Build embeds for a player's stats."""
     vitals = discord.Embed(
         title=player,
         color=COLOR_OK if online else COLOR_WAIT,
@@ -8075,6 +8328,7 @@ def stats_embeds(player, live, stats, online):
 @bot.tree.command(name="stats", description="Health, hunger, ender chest, inventory, and lifetime stats")
 @app_commands.describe(player="Exact Minecraft name")
 async def stats(interaction: discord.Interaction, player: str):
+    """Slash command: show player health, inventory, and stats."""
     if not await gate(interaction):
         return
     if not PLAYER_NAME_RE.fullmatch(player):
@@ -8152,6 +8406,7 @@ TEST_TARGETS = (
 
 
 async def test_one(target, extra):
+    """Test one."""
     extra = (extra or "").strip()
     if target == "rcon":
         ok, detail = await rcon_diagnose()
@@ -8250,6 +8505,7 @@ async def test(
     target: app_commands.Choice[str],
     extra: typing.Optional[str] = None,
 ):
+    """Slash command: run internal self-tests."""
     if not await gate(interaction):
         return
     target = target.value
@@ -8324,6 +8580,7 @@ def player_login_address(name):
 @bot.tree.command(name="ping", description="Ping a public IP or an online player")
 @app_commands.describe(target="Public IP, or a player name such as player123")
 async def ping(interaction: discord.Interaction, target: str):
+    """Slash command: ping the server or a player."""
     if not await gate(interaction):
         return
 
@@ -8464,6 +8721,7 @@ async def say_ping_lines(lines):
 
 @bot.tree.command(name="pingall", description="Ping every player who is online")
 async def pingall(interaction: discord.Interaction):
+    """Slash command: ping all online players."""
     if not await gate(interaction):
         return
     await interaction.response.defer()
@@ -8523,6 +8781,7 @@ class DemandLog:
     appended to the manual log file, which rotates at MC_BOT_LOG_MAX_MB."""
 
     def __init__(self, target, minutes):
+        """Internal: init."""
         self.target = target
         self.minutes = minutes
         self.stop = asyncio.Event()
@@ -8530,20 +8789,24 @@ class DemandLog:
         self.deadline = time.monotonic() + minutes * 60
 
     def add(self, line):
+        """Add."""
         shown = f"{time.strftime('%H:%M:%S')}  {one_line(redact_ips(line), 160)}"
         self.lines.append(shown)
         append_manual_log(f"[{self.target}] {shown}")
 
     def render(self, title):
+        """Render."""
         body = "\n".join(self.lines) if self.lines else "waiting for a line..."
         return clip_discord(f"{title}\n```\n{body}\n```")
 
 
 def _log_view(session):
+    """Internal: log view."""
     view = discord.ui.View(timeout=session.minutes * 60 + 30)
     button = discord.ui.Button(label="Stop", style=discord.ButtonStyle.danger)
 
     async def on_click(button_interaction):
+        """On click."""
         try:
             if not await gate(button_interaction):
                 return
@@ -8558,6 +8821,7 @@ def _log_view(session):
 
 
 async def sample_log(target):
+    """Sample recent lines from a log target."""
     if target == "tps":
         result = await get_tps()
         return fmt_tps(*result) if result else "no TPS response"
@@ -8580,6 +8844,7 @@ async def sample_log(target):
 
 
 async def _safe_message_edit(message, content, **kwargs):
+    """Internal: safe message edit."""
     try:
         await message.edit(content=clip_discord(content), **kwargs)
         return True
@@ -8588,6 +8853,7 @@ async def _safe_message_edit(message, content, **kwargs):
 
 
 async def run_demand_log(interaction, session):
+    """Stream a log to Discord for a limited time."""
     header = (
         f"Log {session.target} | every {LOG_SAMPLE_SECONDS[session.target]}s | "
         f"{session.minutes} min | last {LOG_SHOW_LINES} lines"
@@ -8693,6 +8959,7 @@ async def log_command(
     target: app_commands.Choice[str],
     minutes: typing.Optional[app_commands.Choice[int]] = None,
 ):
+    """Slash command: follow a log for a while."""
     if not await gate(interaction):
         return
     target = target.value
@@ -8719,6 +8986,7 @@ async def log_command(
     description="Test the RCON connection and say what is wrong",
 )
 async def rcontest(interaction: discord.Interaction):
+    """Slash command: diagnose the RCON connection."""
     if not await gate(interaction):
         return
 
@@ -8768,18 +9036,22 @@ async def rcontest(interaction: discord.Interaction):
 # ============================================================
 
 async def _close_bot_soon():
+    """Internal: close bot soon."""
     await asyncio.sleep(1)  # let the reply reach Discord first
     log.warning("Stopping the bot (/botstop). The Minecraft server is not touched.")
     await bot.close()
 
 
 class BotStopView(discord.ui.View):
+    """Confirmation view for /botstop."""
     def __init__(self):
+        """Internal: init."""
         super().__init__(timeout=30)
         self.message = None
 
     @discord.ui.button(label="Stop the bot", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction, button):
+        """Confirm."""
         if not await gate(interaction, admin=True):
             return
         cmd_log.warning("/botstop confirmed by %s", describe_user(interaction.user))
@@ -8796,6 +9068,7 @@ class BotStopView(discord.ui.View):
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction, button):
+        """Cancel."""
         if not await gate(interaction, admin=True):
             return
         cmd_log.info("/botstop cancelled by %s", describe_user(interaction.user))
@@ -8805,6 +9078,7 @@ class BotStopView(discord.ui.View):
         )
 
     async def on_timeout(self):
+        """On timeout."""
         if self.message is not None:
             try:
                 await self.message.edit(content="Timed out. The bot keeps running.", view=None)
@@ -8813,18 +9087,22 @@ class BotStopView(discord.ui.View):
 
 
 async def _reset_bot_soon():
+    """Internal: reset bot soon."""
     await asyncio.sleep(1)
     log.warning("Resetting the bot (/botreset). The Minecraft server is not touched.")
     os._exit(1)  # non-zero so systemd Restart=on-failure starts it again
 
 
 class BotResetView(discord.ui.View):
+    """Confirmation view for /botreset."""
     def __init__(self):
+        """Internal: init."""
         super().__init__(timeout=30)
         self.message = None
 
     @discord.ui.button(label="Reset the bot", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction, button):
+        """Confirm."""
         if not await gate(interaction, admin=True):
             return
         cmd_log.warning("/botreset confirmed by %s", describe_user(interaction.user))
@@ -8840,6 +9118,7 @@ class BotResetView(discord.ui.View):
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction, button):
+        """Cancel."""
         if not await gate(interaction, admin=True):
             return
         self.stop()
@@ -8848,6 +9127,7 @@ class BotResetView(discord.ui.View):
         )
 
     async def on_timeout(self):
+        """On timeout."""
         if self.message is not None:
             try:
                 await self.message.edit(content="Timed out. The bot keeps running.", view=None)
@@ -8857,6 +9137,7 @@ class BotResetView(discord.ui.View):
 
 @bot.tree.command(name="botreset", description="Restart this bot (the Minecraft server keeps running)")
 async def botreset(interaction: discord.Interaction):
+    """Slash command: restart the bot process."""
     if not await gate(interaction, admin=True):
         return
     if _stress_running:
@@ -8877,6 +9158,7 @@ async def botreset(interaction: discord.Interaction):
 
 @bot.tree.command(name="botstop", description="Stop this bot (the Minecraft server keeps running)")
 async def botstop(interaction: discord.Interaction):
+    """Slash command: stop the bot process."""
     if not await gate(interaction, admin=True):
         return
     if _stress_running:
@@ -8917,6 +9199,7 @@ CHAT_CONSOLE_COMMANDS = frozenset({
 
 
 def _console_word(raw):
+    """Internal: console word."""
     word = raw.lower()
     if word.startswith("minecraft:"):
         word = word[len("minecraft:"):]
@@ -8940,6 +9223,7 @@ def blocked_console_command(command):
 
 
 def console_reply_rejected(output):
+    """Console reply rejected."""
     return output is not None and re.search(
         r"unknown|incorrect", strip_colors(output), re.IGNORECASE
     ) is not None
@@ -8976,6 +9260,7 @@ def console_tail_text():
 
 
 def console_embed(session, text, ended=None):
+    """Build the embed for the live console view."""
     if text is None:
         body = f"No log file at {LOG_PATH}\nCheck MC_LOG_PATH in .env."
     else:
@@ -9047,6 +9332,7 @@ class ConsoleSession:
     """One person's live console: an ephemeral message that edits itself."""
 
     def __init__(self, interaction):
+        """Internal: init."""
         self.interaction = interaction
         self.user = interaction.user
         self.stop = asyncio.Event()
@@ -9063,14 +9349,17 @@ class ConsoleSession:
         self.view = ConsoleView(self)
 
     def close(self):
+        """Close."""
         self.stop.set()
         self.wake.set()
 
     def poke(self):
+        """Poke."""
         self.force = True
         self.wake.set()
 
     def _signature(self):
+        """Internal: signature."""
         try:
             info = os.stat(LOG_PATH)
             file_sig = (info.st_ino, info.st_size, info.st_mtime_ns)
@@ -9079,6 +9368,7 @@ class ConsoleSession:
         return (file_sig, self.running, self.last_seq)
 
     async def _refresh_running(self):
+        """Internal: refresh running."""
         now = time.monotonic()
         if now - self.running_at < 10 and not self.force:
             return
@@ -9089,6 +9379,7 @@ class ConsoleSession:
         self.running_at = now
 
     async def render(self, ended=None):
+        """Render."""
         await self._refresh_running()
         sig = self._signature()
         if ended is None and not self.force and sig == self.sig:
@@ -9116,6 +9407,7 @@ class ConsoleSession:
         return True
 
     async def run(self):
+        """Run."""
         console_sessions.add(self)
         log.info("Console opened by %s", describe_user(self.user))
         try:
@@ -9144,6 +9436,7 @@ class ConsoleSession:
 
 
 class ConsoleCommandModal(discord.ui.Modal, title="Minecraft console"):
+    """Modal that collects a console command to run."""
     command = discord.ui.TextInput(
         label="Command (without the /)",
         placeholder="list    say hello    time set day",
@@ -9151,10 +9444,12 @@ class ConsoleCommandModal(discord.ui.Modal, title="Minecraft console"):
     )
 
     def __init__(self, session):
+        """Internal: init."""
         super().__init__()
         self.session = session
 
     async def on_submit(self, interaction):
+        """On submit."""
         if not await gate(interaction, admin=True):
             return
         await interaction.response.defer()
@@ -9167,6 +9462,7 @@ class ConsoleCommandModal(discord.ui.Modal, title="Minecraft console"):
         self.session.poke()
 
     async def on_error(self, interaction, error):
+        """On error."""
         log.error("Console command box failed: %r", error, exc_info=error)
         try:
             if interaction.response.is_done():
@@ -9180,24 +9476,30 @@ class ConsoleCommandModal(discord.ui.Modal, title="Minecraft console"):
 
 
 class ConsoleView(discord.ui.View):
+    """Persistent view for the live console session."""
     def __init__(self, session):
+        """Internal: init."""
         super().__init__(timeout=None)  # the session decides when it ends
         self.session = session
 
     async def interaction_check(self, interaction):
+        """Interaction check."""
         return await gate(interaction, admin=True)
 
     @discord.ui.button(label="Command", style=discord.ButtonStyle.primary, row=0)
     async def send(self, interaction, button):
+        """Send."""
         await interaction.response.send_modal(ConsoleCommandModal(self.session))
 
     @discord.ui.button(label="Refresh", style=discord.ButtonStyle.secondary, row=0)
     async def refresh(self, interaction, button):
+        """Refresh."""
         self.session.poke()
         await interaction.response.defer()
 
     @discord.ui.button(label="Close window", style=discord.ButtonStyle.danger, row=1)
     async def close_console(self, interaction, button):
+        """Close console."""
         self.session.end_reason = "Closed."
         self.session.close()
         await interaction.response.defer()
@@ -9222,6 +9524,7 @@ def claim_console_slot(interaction):
     description="Live Minecraft console with a box to type commands",
 )
 async def console(interaction: discord.Interaction):
+    """Slash command: open a live console session."""
     if not await gate(interaction, admin=True):
         return
 
@@ -9328,7 +9631,9 @@ _UNESCAPES = {"t": "\t", "n": "\n", "r": "\r", "f": "\f"}
 
 
 def props_unescape(raw):
+    """Unescape a server.properties value."""
     def repl(match):
+        """Repl."""
         token = match.group(1)
         if token[0] == "u" and len(token) == 5:
             return chr(int(token[1:], 16))
@@ -9343,6 +9648,7 @@ def props_unescape(raw):
 
 
 def props_escape(value):
+    """Escape a value for server.properties."""
     out = []
     for index, char in enumerate(value):
         if char == "\\":
@@ -9388,10 +9694,12 @@ def props_load():
 
 
 def props_current(found, key):
+    """Props current."""
     return props_unescape(found[key][-1][1]) if key in found else ""
 
 
 def props_display(key, value, width=80):
+    """Format a server.properties value for display."""
     if key in PROP_SECRET:
         return "(set, hidden)" if value else "(empty)"
     if value == "":
@@ -9400,6 +9708,7 @@ def props_display(key, value, width=80):
 
 
 def props_kind(key, current):
+    """Classify a server.properties key."""
     if key in PROP_ENUMS:
         return "options: " + ", ".join(PROP_ENUMS[key])
     if key in PROP_TEXT:
@@ -9540,6 +9849,7 @@ def props_edit(key_input, value_input):
 
 
 def log_props_note():
+    """Log props note."""
     if os.path.isfile(PROPS_PATH):
         log.info("/serveredit edits %s", PROPS_PATH)
     else:
@@ -9551,6 +9861,7 @@ def log_props_note():
 
 
 def _props_missing_text(error):
+    """Internal: props missing text."""
     if isinstance(error, FileNotFoundError):
         return (
             f"[!] Can't find `{PROPS_PATH}`.\nSet `MC_PROPERTIES_PATH` in `.env` "
@@ -9560,6 +9871,7 @@ def _props_missing_text(error):
 
 
 async def serveredit_list(interaction):
+    """List editable server.properties keys."""
     try:
         _, found, _encoding = await asyncio.to_thread(props_load)
     except OSError as error:
@@ -9591,6 +9903,7 @@ async def serveredit_list(interaction):
 
 
 async def serveredit_show(interaction, setting):
+    """Show the current value of a server.properties key."""
     try:
         _, found, _encoding = await asyncio.to_thread(props_load)
     except OSError as error:
@@ -9616,6 +9929,7 @@ async def serveredit_show(interaction, setting):
 
 
 async def serveredit_apply(interaction, setting, value):
+    """Apply a change to server.properties."""
     try:
         running = await server_running(force=True)
     except AmbiguousServer:
@@ -9658,6 +9972,7 @@ async def serveredit(
     setting: typing.Optional[str] = None,
     value: typing.Optional[str] = None,
 ):
+    """Slash command: view or edit server.properties."""
     if not await gate(interaction, admin=True):
         return
 
@@ -9685,6 +10000,7 @@ async def serveredit(
 
 @serveredit.autocomplete("setting")
 async def serveredit_setting_choices(interaction: discord.Interaction, current: str):
+    """Serveredit setting choices."""
     if guild_problem(interaction) or not member_is_admin(interaction):
         return []
     try:
@@ -9706,6 +10022,7 @@ async def serveredit_setting_choices(interaction: discord.Interaction, current: 
 
 @serveredit.autocomplete("value")
 async def serveredit_value_choices(interaction: discord.Interaction, current: str):
+    """Serveredit value choices."""
     if guild_problem(interaction) or not member_is_admin(interaction):
         return []
     key = (getattr(interaction.namespace, "setting", None) or "").strip().lower()
@@ -9742,14 +10059,17 @@ class PanelView(discord.ui.View):
     """The everyday controls. Choices are a menu, actions are buttons."""
 
     def __init__(self):
+        """Internal: init."""
         super().__init__(timeout=600)
         self.message = None
         self.add_item(LogSelect())
 
     async def interaction_check(self, interaction):
+        """Interaction check."""
         return await gate(interaction)
 
     async def on_timeout(self):
+        """On timeout."""
         for child in self.children:
             child.disabled = True
         if self.message is None:
@@ -9761,36 +10081,45 @@ class PanelView(discord.ui.View):
 
     @discord.ui.button(label="Status", style=discord.ButtonStyle.secondary, row=0)
     async def status_button(self, interaction, button):
+        """Status button."""
         await status.callback(interaction)
 
     @discord.ui.button(label="Start", style=discord.ButtonStyle.success, row=0)
     async def start_button(self, interaction, button):
+        """Start button."""
         await start.callback(interaction)
 
     @discord.ui.button(label="Save", style=discord.ButtonStyle.secondary, row=0)
     async def save_button(self, interaction, button):
+        """Save button."""
         await save.callback(interaction)
 
     @discord.ui.button(label="Stop", style=discord.ButtonStyle.danger, row=1)
     async def stop_button(self, interaction, button):
+        """Stop button."""
         await stop.callback(interaction)
 
     @discord.ui.button(label="Restart", style=discord.ButtonStyle.danger, row=1)
     async def restart_button(self, interaction, button):
+        """Restart button."""
         await restart.callback(interaction)
 
     @discord.ui.button(label="Console", style=discord.ButtonStyle.primary, row=1)
     async def console_button(self, interaction, button):
+        """Console button."""
         await console.callback(interaction)
 
     @discord.ui.button(label="Close panel", style=discord.ButtonStyle.secondary, row=3)
     async def close_panel(self, interaction, button):
+        """Close panel."""
         await interaction.response.edit_message(content="Panel closed.", embed=None, view=None)
         self.stop()
 
 
 class LogSelect(discord.ui.Select):
+    """Select menu for choosing a log target."""
     def __init__(self):
+        """Internal: init."""
         super().__init__(
             placeholder="Log a system for 20 minutes",
             min_values=1,
@@ -9808,6 +10137,7 @@ class LogSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction):
+        """Callback."""
         if not await gate(interaction):
             return
         target = self.values[0]
@@ -9824,6 +10154,7 @@ class LogSelect(discord.ui.Select):
 
 
 async def panel_embed():
+    """Build the control-panel embed."""
     pid = await find_server_pid()
     if pid is None:
         return panel("Server", ["Offline", "Use Start, or open the console after it is up."], COLOR_BAD)
@@ -9837,6 +10168,7 @@ async def panel_embed():
 
 @bot.tree.command(name="panel", description="Server controls: buttons for actions, a menu for logs")
 async def panel_command(interaction: discord.Interaction):
+    """Slash command: show the control panel."""
     if not await gate(interaction):
         return
     await interaction.response.defer()
@@ -9961,6 +10293,7 @@ def update_log(message):
 
 
 def _git(args, timeout=GIT_TIMEOUT):
+    """Run a git command and return its output."""
     return subprocess.run(
         ["git", *args], cwd=BASE_DIR, timeout=timeout,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
@@ -10042,6 +10375,7 @@ def update_from_github():
 
 
 def main():
+    """Entry point: lock, update check, and run the bot."""
     if not TOKEN:
         raise SystemExit(
             f"DISCORD_TOKEN is missing from {os.path.join(BASE_DIR, '.env')}"
