@@ -7280,6 +7280,18 @@ class StressView(discord.ui.View):
 
 STRESS_WARN = "Long duration validation test underway. Changes you make will NOT be saved."
 STRESS_MAX_MINUTES = 300  # 5 hours
+STRESS_DIMS = ("overworld", "nether", "end")
+DIM_EXECUTE = {
+    "overworld": "minecraft:overworld",
+    "nether": "minecraft:the_nether",
+    "end": "minecraft:the_end",
+}
+
+
+def dim_cmd(dimension, command):
+    """Prefix a console command so it runs in the named dimension."""
+    dim = DIM_EXECUTE.get(dimension, "minecraft:overworld")
+    return f"execute in {dim} run {command}"
 
 
 def stress_graph(tps_points, ping_points):
@@ -7464,41 +7476,52 @@ async def stress_restore_world(status, folder):
     return await stress_start_server(status)
 
 
-async def stress_load_area(x, z, size=32):
+async def stress_load_area(x, z, size=32, dimension="overworld"):
     """forceload a square so fill and summon actually run. Both no-op on unloaded chunks."""
 
     await send_console(
-        f"forceload add {x} {z} {x + size} {z + size}",
+        dim_cmd(dimension, f"forceload add {x} {z} {x + size} {z + size}"),
         timeout=8,
     )
     await asyncio.sleep(0.4)
 
 
-async def stress_heavy_burst():
-    """One destructive burst. The world is restored from the snapshot afterwards."""
+async def stress_heavy_burst(dimension="overworld"):
+    """One destructive burst in a chosen dimension. The world is restored from the snapshot afterwards."""
 
-    base_x = random.randint(-2000, 2000)
-    base_z = random.randint(-2000, 2000)
-    y = random.randint(80, 120)
+    # Nether/End have different safe Y ranges; stay above bedrock-ish.
+    if dimension == "nether":
+        base_x = random.randint(-500, 500)
+        base_z = random.randint(-500, 500)
+        y = random.randint(40, 80)
+    elif dimension == "end":
+        base_x = random.randint(-200, 200)
+        base_z = random.randint(-200, 200)
+        y = random.randint(60, 90)
+    else:
+        base_x = random.randint(-2000, 2000)
+        base_z = random.randint(-2000, 2000)
+        y = random.randint(80, 120)
     notes = []
     kind = random.choice(("place", "chunks", "elytra", "explode", "village", "mobs"))
+    notes.append(f"[{dimension}]")
     if kind == "place":
-        await stress_load_area(base_x, base_z, 96)
+        await stress_load_area(base_x, base_z, 96, dimension)
         for n in range(4):
             x = base_x + n * 20
             z = base_z + n * 16
             await send_console(
-                f"fill {x} {y} {z} {x + 6} {y + 4} {z + 6} minecraft:cobblestone",
+                dim_cmd(dimension, f"fill {x} {y} {z} {x + 6} {y + 4} {z + 6} minecraft:cobblestone"),
                 timeout=6,
             )
             await send_console(
-                f"fill {x} {y} {z} {x + 6} {y + 4} {z + 6} minecraft:air",
+                dim_cmd(dimension, f"fill {x} {y} {z} {x + 6} {y + 4} {z + 6} minecraft:air"),
                 timeout=6,
             )
         notes.append(f"4 players placed and broke near {base_x},{base_z}")
     elif kind == "chunks":
         await send_console(
-            f"forceload add {base_x} {base_z} {base_x + 144} {base_z + 144}",
+            dim_cmd(dimension, f"forceload add {base_x} {base_z} {base_x + 144} {base_z + 144}"),
             timeout=8,
         )
         await asyncio.sleep(random.uniform(2, 4))
@@ -7507,38 +7530,38 @@ async def stress_heavy_burst():
         dx, dz = random.choice(((64, 0), (-64, 0), (0, 64), (0, -64), (48, 48)))
         x, z = base_x, base_z
         for _ in range(random.randint(8, 14)):
-            await send_console(f"forceload add {x} {z} {x + 31} {z + 31}", timeout=4)
+            await send_console(dim_cmd(dimension, f"forceload add {x} {z} {x + 31} {z + 31}"), timeout=4)
             x += dx
             z += dz
             await asyncio.sleep(0.35)
         notes.append(f"elytra-style chunk line from {base_x},{base_z}")
     elif kind == "explode":
-        await stress_load_area(base_x, base_z, 48)
+        await stress_load_area(base_x, base_z, 48, dimension)
         for _n in range(random.randint(6, 12)):
             x = base_x + random.randint(0, 40)
             z = base_z + random.randint(0, 40)
             await send_console(
-                f"summon minecraft:tnt {x} {y} {z} {{Fuse:{random.randint(15, 40)}}}",
+                dim_cmd(dimension, f"summon minecraft:tnt {x} {y} {z} {{Fuse:{random.randint(15, 40)}}}"),
                 timeout=4,
             )
         notes.append(f"explosions at {base_x},{base_z}")
     elif kind == "village":
-        await stress_load_area(base_x, base_z, 32)
+        await stress_load_area(base_x, base_z, 32, dimension)
         for n in range(random.randint(8, 14)):
             await send_console(
-                f"summon minecraft:villager {base_x + n} {y} {base_z}",
+                dim_cmd(dimension, f"summon minecraft:villager {base_x + n} {y} {base_z}"),
                 timeout=4,
             )
-        await send_console(f"summon minecraft:iron_golem {base_x} {y} {base_z}", timeout=4)
-        await send_console(f"summon minecraft:zombie {base_x + 6} {y} {base_z}", timeout=4)
+        await send_console(dim_cmd(dimension, f"summon minecraft:iron_golem {base_x} {y} {base_z}"), timeout=4)
+        await send_console(dim_cmd(dimension, f"summon minecraft:zombie {base_x + 6} {y} {base_z}"), timeout=4)
         notes.append(f"villagers and a raid at {base_x},{base_z}")
     else:
-        await stress_load_area(base_x, base_z, 32)
+        await stress_load_area(base_x, base_z, 32, dimension)
         for _n in range(random.randint(10, 24)):
             x = base_x + random.randint(0, 24)
             z = base_z + random.randint(0, 24)
             mob = random.choice(("zombie", "skeleton", "creeper"))
-            await send_console(f"summon minecraft:{mob} {x} {y} {z}", timeout=4)
+            await send_console(dim_cmd(dimension, f"summon minecraft:{mob} {x} {y} {z}"), timeout=4)
         notes.append(f"mob horde at {base_x},{base_z}")
     return ", ".join(notes) or kind
 
@@ -7550,7 +7573,7 @@ async def stress_warn():
     await send_console(f"tellraw @a {payload}", timeout=4)
 
 
-@bot.tree.command(name="stresstest", description="Randomised 4-player load, network, and health log")
+@bot.tree.command(name="stresstest", description="Multi-dimension load test (overworld/nether/end), network, and health log")
 @app_commands.describe(minutes="Minutes. Default 20, maximum 300")
 async def stresstest(interaction: discord.Interaction, minutes: typing.Optional[int] = 20):
     global _stress_running
@@ -7573,7 +7596,7 @@ async def stresstest(interaction: discord.Interaction, minutes: typing.Optional[
     try:
         # A channel message stays editable past 15 minutes. A followup webhook does not.
         message = await interaction.channel.send(
-            embed=panel("Stress test", [f"Starting a {minutes} min randomised load."], COLOR_WAIT),
+            embed=panel("Stress test", [f"Starting a {minutes} min multi-dimension load (overworld + nether + end)."], COLOR_WAIT),
             view=view,
         )
         bot.add_view(view, message_id=message.id)
@@ -7605,7 +7628,13 @@ async def stresstest(interaction: discord.Interaction, minutes: typing.Optional[
                 await stress_warn()
                 next_warn = time.monotonic() + 120
             try:
-                world_note = await stress_heavy_burst()
+                # Run several simulations at once across dimensions.
+                dims = random.sample(STRESS_DIMS, k=min(3, len(STRESS_DIMS)))
+                burst_notes = []
+                for dim in dims:
+                    note = await stress_heavy_burst(dim)
+                    burst_notes.append(note)
+                world_note = " | ".join(burst_notes)
                 health = await health_snapshot()
                 net = list(await network_burst())
             except Exception as error:
@@ -7672,12 +7701,13 @@ async def stresstest(interaction: discord.Interaction, minutes: typing.Optional[
                 pass
     finally:
         await send_console("forceload remove all", timeout=6)
-        await send_console("kill @e[type=tnt]", timeout=4)
-        await send_console("kill @e[type=villager]", timeout=4)
-        await send_console("kill @e[type=iron_golem]", timeout=4)
-        await send_console("kill @e[type=zombie]", timeout=4)
-        await send_console("kill @e[type=skeleton]", timeout=4)
-        await send_console("kill @e[type=creeper]", timeout=4)
+        for dim in STRESS_DIMS:
+            await send_console(dim_cmd(dim, "kill @e[type=tnt]"), timeout=4)
+            await send_console(dim_cmd(dim, "kill @e[type=villager]"), timeout=4)
+            await send_console(dim_cmd(dim, "kill @e[type=iron_golem]"), timeout=4)
+            await send_console(dim_cmd(dim, "kill @e[type=zombie]"), timeout=4)
+            await send_console(dim_cmd(dim, "kill @e[type=skeleton]"), timeout=4)
+            await send_console(dim_cmd(dim, "kill @e[type=creeper]"), timeout=4)
         restored = await stress_restore_world(status, snapshot)
         _stress_running = False
         view.stop()
