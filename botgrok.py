@@ -2758,10 +2758,25 @@ async def launch_server():
     return SimpleNamespace(proc=proc, log_offset=log_offset)
 
 
+def is_stale_world_name(name):
+    """True only for known world folders with a stale suffix.
+
+    Matches world.old, world_nether.old-layout, world_the_end.old, etc.
+    Does not match plugins.old, config.old, or arbitrary *.old folders.
+    """
+    for suffix in (".old", ".old-layout"):
+        if name.endswith(suffix):
+            base = name[: -len(suffix)]
+            if base in ("world", "world_nether", "world_the_end") or base.startswith("world"):
+                return True
+    return False
+
+
 def clean_stale_world_folders():
     """Delete leftover world copies before start.
 
-    Same as: rm -rf *.before-restore *.before-restore-* *.old-layout *.old
+    Only known world folders ending in .old or .old-layout.
+    *.before-restore copies are kept as a restore safety net.
     """
 
     root = server_root()
@@ -2772,11 +2787,7 @@ def clean_stale_world_folders():
         return removed
     for name in names:
         path = os.path.join(root, name)
-        stale = (
-            name.endswith((".before-restore", ".old-layout", ".old"))
-            or ".before-restore-" in name
-        )
-        if stale and os.path.isdir(path):
+        if is_stale_world_name(name) and os.path.isdir(path):
             shutil.rmtree(path, ignore_errors=True)
             removed.append(name)
             log.info("Removed stale world folder %s", name)
@@ -5797,21 +5808,8 @@ def restore_backup_folder(folder):
                 moved.append((dest, aside))
             created.append(dest)
             shutil.copytree(os.path.join(folder, name), dest)
-        # The copy is in place. The renamed worlds and any old-layout leftovers
-        # are no longer needed, and Paper 26 crashes if both layouts exist.
-        for _dest, aside in moved:
-            shutil.rmtree(aside, ignore_errors=True)
-        for name in os.listdir(root):
-            path = os.path.join(root, name)
-            stale = (
-                name.endswith((".old", ".old-layout", ".before-restore"))
-                or ".before-restore-" in name
-            )
-            if stale and os.path.isdir(path):
-                shutil.rmtree(path, ignore_errors=True)
-                log.info("Removed leftover world folder %s", name)
-        remove_legacy_dimension_folders()
-        return list(names)
+        # Copy succeeded. Keep the *.before-restore asides as a safety net.
+        # Do not delete them here.
     except Exception:
         for path in reversed(created):
             shutil.rmtree(path, ignore_errors=True)
@@ -5821,6 +5819,18 @@ def restore_backup_folder(folder):
             except OSError:
                 log.error("Restore rollback: couldn't move %s back to %s", aside, dest)
         raise
+    # Cleanup of leftover .old / .old-layout folders happens after a successful
+    # restore, outside the try, so a late failure cannot destroy both copies.
+    try:
+        for name in os.listdir(root):
+            path = os.path.join(root, name)
+            if is_stale_world_name(name) and os.path.isdir(path):
+                shutil.rmtree(path, ignore_errors=True)
+                log.info("Removed leftover world folder %s", name)
+        remove_legacy_dimension_folders()
+    except Exception:
+        log.exception("Post-restore cleanup failed (worlds were still restored)")
+    return list(names)
 
 
 class RestoreView(discord.ui.View):
