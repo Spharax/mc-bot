@@ -4539,7 +4539,11 @@ class ConfirmView(discord.ui.View):
         open_confirms.add(self)
         for child in self.children:
             if getattr(child, "label", "") == "Yes, do it":
-                child.label = "Stop server" if op == "stop" else "Restart server"
+                child.label = {
+                    "stop": "Stop server",
+                    "restart": "Restart server",
+                    "stresstest": "Start test",
+                }.get(op, "Yes, do it")
 
     async def interaction_check(self, interaction):
         """Interaction check."""
@@ -5446,6 +5450,10 @@ async def chat_backup_from(player):
 async def run_text_start(who, reply):
     """Start the server from a chat command. reply(text) reports progress."""
 
+    if _stress_running:
+        # why: snapshot and restore stop the server; a start then corrupts the world
+        await reply("a stress test is running")
+        return
     if not try_lock("start"):
         await reply("start already running")
         return
@@ -5805,7 +5813,8 @@ async def wake_on_ping_loop():
     global _wake_server
     while True:
         try:
-            if await server_running() or _wake_holds:
+            if await server_running() or _wake_holds or _stress_running:
+                # why: a join during snapshot/restore would launch Paper into a half-copied world
                 await close_wake_listener()
                 await asyncio.sleep(2)
                 continue
@@ -7240,188 +7249,6 @@ def tps_chart(window, title):
 # ============================================================
 
 _stress_running = False
-INHABITED_LIMIT = 200  # ticks. About 10 seconds in a chunk counts as touched.
-
-
-def chunk_inhabited(root):
-    """Return a chunk's InhabitedTime."""
-    try:
-        return int(root.get("InhabitedTime", 0))
-    except (TypeError, ValueError):
-        return 10**9
-
-
-def _nibble(raw, x, y, z):
-    """Read a 4-bit light value from a nibble array."""
-    if not isinstance(raw, (bytes, bytearray)) or len(raw) < 2048:
-        return None
-    index = ((y & 15) << 8) | ((z & 15) << 4) | (x & 15)
-    byte = raw[index >> 1]
-    return (byte >> 4) & 15 if index & 1 else byte & 15
-
-
-def light_at(root, x, y, z):
-    """(block light, sky light). None if that array is missing.
-
-    Hostile mobs need both at 0. Surface sky light is 15 in daytime.
-    """
-
-    section_y = y >> 4
-    for section in root.get("sections") or root.get("Sections") or []:
-        if not isinstance(section, dict) or int(section.get("Y", 999)) != section_y:
-            continue
-        return _nibble(section.get("BlockLight"), x, y, z), _nibble(section.get("SkyLight"), x, y, z)
-    return None, None
-
-
-def block_name_at(root, x, y, z):
-    """Block id at a world position inside this chunk, or air."""
-
-    local = ((z & 15) << 4) | (x & 15)
-    section_y = y >> 4
-    for section in root.get("sections") or root.get("Sections") or []:
-        if not isinstance(section, dict) or int(section.get("Y", 999)) != section_y:
-            continue
-        states = section.get("block_states") or {}
-        names = [palette_name(entry) for entry in states.get("palette") or []]
-        data = states.get("data") or []
-        if not names:
-            return "minecraft:air"
-        if len(names) == 1 or not data:
-            return names[0]
-        bits = max(4, (len(names) - 1).bit_length())
-        per_long = 64 // bits
-        index = ((y & 15) << 8) | local
-        word = index // per_long
-        if word >= len(data):
-            return names[0]
-        value = (data[word] >> (index % per_long * bits)) & ((1 << bits) - 1)
-        return names[value] if value < len(names) else names[0]
-    return "minecraft:air"
-
-
-def find_quiet_columns(limit=8, avoid=()):
-    """Columns in chunks players have barely visited, away from spawn and anyone online."""
-
-    region_dir, base = region_dir_for("overworld")
-    if region_dir is None:
-        return []
-    try:
-        spawn_x, spawn_z = default_center()
-    except Exception:
-        spawn_x = spawn_z = 0
-    avoid = ((spawn_x, spawn_z),) + tuple(avoid)
-    found = []
-    names = [name for name in sorted(os.listdir(region_dir)) if name.endswith(".mca")]
-    # Far regions are the quiet ones. Cap the scan so a huge world cannot stall the test.
-    for name in names[:40]:
-        if len(found) >= limit:
-            break
-        path = os.path.join(region_dir, name)
-        try:
-            with open(path, "rb") as file:
-                for index in range(1024):
-                    if len(found) >= limit:
-                        break
-                    root = read_chunk(file, index)
-                    if root is None or chunk_inhabited(root) > INHABITED_LIMIT:
-                        continue
-                    cx = int(root.get("xPos", 0))
-                    cz = int(root.get("zPos", 0))
-                    wx, wz = cx * 16 + 8, cz * 16 + 8
-                    if any(abs(wx - ax) < 256 and abs(wz - az) < 256 for ax, az in avoid):
-                        continue
-                    maps = root.get("Heightmaps") or {}
-                    top = _heightmap(maps.get("MOTION_BLOCKING") or maps.get("WORLD_SURFACE") or [])
-                    if not top:
-                        continue
-                    local = 8 * 16 + 8
-                    min_y = int(root.get("yPos", -4))
-                    min_y = min_y * 16 if -16 < min_y < 16 else min_y
-                    y = min_y + top[local] - 1
-                    found.append((wx, y, wz, root, block_name_at(root, wx, y, wz)))
-        except Exception:
-            continue
-    return found
-
-
-SAFE_SKIP = {
-    "minecraft:air", "minecraft:cave_air", "minecraft:void_air",
-    "minecraft:water", "minecraft:lava", "minecraft:bedrock",
-    "minecraft:chest", "minecraft:trapped_chest", "minecraft:barrel",
-    "minecraft:spawner", "minecraft:end_portal", "minecraft:end_portal_frame",
-    "minecraft:nether_portal", "minecraft:end_gateway",
-}
-
-
-def safe_block(name):
-    """Return a block id if it is safe to overwrite, else None."""
-    name = name if ":" in name else f"minecraft:{name}"
-    if name in SAFE_SKIP or name.endswith("_chest") or name.endswith("_door") or name.endswith("_bed"):
-        return None
-    return name
-
-
-async def restore_blocks(placed):
-    """Restore blocks that were temporarily changed."""
-    left = []
-    for x, y, z, original in placed:
-        ok, _out = await send_console(f"setblock {x} {y} {z} {original}", timeout=4)
-        if not ok:
-            left.append((x, y, z, original))
-    placed[:] = left
-    return left
-
-
-async def stress_world_burst(placed):
-    """One randomised burst: a few blocks, maybe a mob, then put it back."""
-
-    avoid = []
-    try:
-        for name in await online_player_names() or []:
-            pos = parse_pos(await entity_data(name, "Pos") or "")
-            if pos:
-                avoid.append((pos[0], pos[1]))
-    except Exception:
-        pass
-    columns = await asyncio.to_thread(find_quiet_columns, 6, tuple(avoid))
-    if not columns:
-        return "no untouched chunks, world load skipped"
-    random.shuffle(columns)
-    notes = []
-    for x, y, z, root, original in columns[:random.randint(1, 3)]:
-        original = safe_block(original)
-        if original is None:
-            continue
-        ok, _out = await send_console(f"setblock {x} {y} {z} minecraft:cobblestone", timeout=4)
-        if not ok:
-            notes.append(f"place failed {x},{y},{z}")
-            continue
-        placed.append((x, y, z, original))
-        notes.append(f"placed {x},{y},{z}")
-        await asyncio.sleep(random.uniform(0.4, 1.5))
-        ok, _out = await send_console(f"setblock {x} {y} {z} {original}", timeout=4)
-        if ok and placed and placed[-1][:3] == (x, y, z):
-            placed.pop()
-    # Hostile mobs only in real darkness (block light 0 and sky light 0), then removed.
-    for x, y, z, root, _original in columns:
-        block_light, sky_light = light_at(root, x, y + 1, z)
-        above = block_name_at(root, x, y + 1, z)
-        if block_light != 0 or sky_light != 0 or above not in ("minecraft:air", "minecraft:cave_air", "air", "cave_air"):
-            continue
-        if random.random() < 0.5:
-            continue
-        await send_console(
-            f"summon minecraft:zombie {x} {y + 1} {z} {{Tags:[\"stresstest\"],PersistenceRequired:0}}",
-            timeout=4,
-        )
-        await asyncio.sleep(random.uniform(1, 3))
-        await send_console('kill @e[tag=stresstest]', timeout=4)
-        notes.append(f"mob {x},{y+1},{z}")
-        break
-    return ", ".join(notes) or "quiet burst"
-
-
 async def ping_once(host):
     """ICMP time from ping itself, not the time spent starting the process."""
 
@@ -7861,7 +7688,6 @@ async def stress_warn():
 @app_commands.describe(minutes="Minutes. Default 20, maximum 300")
 async def stresstest(interaction: discord.Interaction, minutes: typing.Optional[int] = 20):
     """Slash command: multi-dimension load test with snapshot/restore."""
-    global _stress_running
     if not await gate(interaction, admin=True):
         return
     if _stress_running:
@@ -7871,13 +7697,33 @@ async def stresstest(interaction: discord.Interaction, minutes: typing.Optional[
     if not await server_running():
         await deny(interaction, "Start the server first.")
         return
-    _stress_running = True
+
+    async def runner(confirmed):
+        await run_stresstest(confirmed, minutes)
+
+    await ask_confirm(
+        interaction,
+        "stresstest",
+        (
+            "**Run a stress test?**\n"
+            f"This stops the server (everyone is kicked) and, for {minutes} minutes, "
+            "fills, loads chunks, and summons TNT in the overworld, nether, and end.\n"
+            "The world is restored from a snapshot at the end. "
+            "**Anything players do during the test is erased.**"
+        ),
+        runner,
+    )
+
+
+async def run_stresstest(interaction, minutes):
+    """The confirmed test. ConfirmView holds the lock until this returns."""
+
+    global _stress_running
+    _stress_running = True  # why: held with the lock so !start and wake cannot launch Paper mid-copy
     invalidate_confirms("A stress test started.")
     stop_event = asyncio.Event()
     view = StressView(stop_event)
-    placed = []
     message = None
-    await interaction.response.defer(ephemeral=False)
     try:
         # A channel message stays editable past 15 minutes. A followup webhook does not.
         message = await interaction.channel.send(
