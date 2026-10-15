@@ -3584,15 +3584,23 @@ async def _metric(command, pattern, timeout=6.0):
         return None
 
     async with tps_lock:
-        before = len(pattern.findall(await tmux_capture()))
+        before = await tmux_capture()
         if not await tmux_send(command):
             return None
         waited = 0.0
         while waited < timeout:
             await asyncio.sleep(0.5)
             waited += 0.5
-            found = pattern.findall(await tmux_capture())
-            if len(found) > before:
+            after = await tmux_capture()
+            # why: counting matches in the 500-line scrollback false-times-out when old lines scroll off
+            if after.startswith(before):
+                fresh = after[len(before):]
+            else:
+                tail = before[-200:]
+                index = after.find(tail) if tail else -1
+                fresh = after[index + len(tail):] if index >= 0 else after
+            found = pattern.findall(fresh)
+            if found:
                 labels, values = found[-1]
                 return labels.strip(), values.strip()
     return None
@@ -8021,11 +8029,8 @@ UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
 NBT_NUMBER_RE = re.compile(r"(-?\d+(?:\.\d+)?)[a-zA-Z]*")
-ITEM_RE = re.compile(
-    r'id:\s*"?(minecraft:[a-z0-9_./-]+)"?.*?count:\s*(\d+)|'
-    r'id:\s*"?(minecraft:[a-z0-9_./-]+)"?.*?Count:\s*(\d+)b?',
-    re.IGNORECASE,
-)
+ITEM_ID_RE = re.compile(r'id:\s*"?(minecraft:[a-z0-9_./-]+)"?', re.IGNORECASE)
+ITEM_COUNT_RE = re.compile(r'\bcount:\s*(\d+)', re.IGNORECASE)
 STAT_LABELS = {
     "minecraft:play_time": "Play time",
     "minecraft:total_world_time": "World time",
@@ -8106,14 +8111,55 @@ def nbt_number(text):
     return int(number) if number.is_integer() else number
 
 
+def _top_level_item_fields(compound):
+    """Fields of one item, with nested compounds removed.
+
+    why: a shulker's contents are nested items; counting them would double
+    the inventory, and id/count order varies by Minecraft version.
+    """
+
+    depth = 0
+    out = []
+    for ch in compound[1:-1]:
+        if ch in "{[":
+            depth += 1
+        elif ch in "}]":
+            depth = max(0, depth - 1)
+        elif depth == 0:
+            out.append(ch)
+    return "".join(out)
+
+
+def _item_compounds(text):
+    """Each top-level {...} in an inventory list. Nested compounds stay inside."""
+
+    depth = 0
+    start = None
+    for index, ch in enumerate(text or ""):
+        if ch == "{":
+            if depth == 0:
+                start = index
+            depth += 1
+        elif ch == "}":
+            if depth:
+                depth -= 1
+            if depth == 0 and start is not None:
+                yield text[start:index + 1]
+                start = None
+
+
 def parse_items(text):
     """Parse an inventory NBT string into item counts."""
     counts = {}
-    for match in ITEM_RE.finditer(text or ""):
-        item = match.group(1) or match.group(3)
-        count = match.group(2) or match.group(4) or "1"
-        name = item.split(":")[-1].replace("_", " ")
-        counts[name] = counts.get(name, 0) + int(count)
+    for compound in _item_compounds(text):
+        fields = _top_level_item_fields(compound)
+        found = ITEM_ID_RE.search(fields)
+        if not found:
+            continue
+        count_match = ITEM_COUNT_RE.search(fields)
+        count = int(count_match.group(1)) if count_match else 1
+        name = found.group(1).split(":")[-1].replace("_", " ")
+        counts[name] = counts.get(name, 0) + count
     if not counts:
         return "empty"
     rows = [f"{name} x{count}" for name, count in sorted(counts.items())]
@@ -8176,7 +8222,13 @@ async def entity_data(player, path):
     """Fetch an entity NBT path via RCON."""
     output = await rcon.command(f"data get entity {player} {path}", timeout=8)
     clean = strip_colors(output).strip()
-    if "No entity was found" in clean or "unknown" in clean.lower():
+    lowered = clean.lower()
+    if "no entity was found" in lowered:
+        return None
+    # why: NBT can contain "unknown" in a custom name; only a command error is missing data
+    if "has the following entity data" in lowered or (clean[:1] in "{["):
+        return clean
+    if "unknown" in lowered or "incorrect" in lowered:
         return None
     return clean
 
@@ -10166,10 +10218,10 @@ async def run_bot_forever():
     while True:
         if last_signature is not None:
             log.warning("Discord failed 5 times. Waiting for the network to change.")
-            while network_signature() == last_signature:
+            while await asyncio.to_thread(network_signature) == last_signature:
                 await asyncio.sleep(5)
         for attempt in range(1, 6):
-            if not discord_reachable():
+            if not await asyncio.to_thread(discord_reachable):
                 log.warning("Discord is unreachable (try %s/5). Next try in 60s.", attempt)
                 await asyncio.sleep(60)
                 continue
@@ -10196,7 +10248,7 @@ async def run_bot_forever():
                 # start() return immediately.
                 log.warning("Discord connection failed (%s). Try %s/5.", error, attempt)
                 await asyncio.sleep(60)
-        last_signature = network_signature()
+        last_signature = await asyncio.to_thread(network_signature)
 
 
 UPDATE_LOG = os.path.join(BOT_LOG_DIR, "update.log")
