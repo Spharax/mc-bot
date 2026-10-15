@@ -260,7 +260,7 @@ def warn_throttled(key, message, *args, every=300):
 # CONFIG
 # ============================================================
 
-VERSION = "1.216"
+VERSION = "1.217"
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = env_int("DISCORD_GUILD_ID", 0)
@@ -9189,10 +9189,12 @@ async def _reset_bot_soon():
     await asyncio.sleep(1)
     log.warning("Resetting the bot (/botreset). The Minecraft server is not touched.")
     try:
-        await bot.close()  # why: os._exit skips shutdown_cleanup (log flush, idle message)
+        await asyncio.wait_for(shutdown_cleanup(), timeout=5)
     except Exception as error:
         log.warning("Cleanup before reset failed: %s", error)
-    os._exit(1)  # non-zero so systemd Restart=on-failure starts it again
+    # Do not close() first. That ends the process with code 0, and
+    # Restart=on-failure will not start it again.
+    os._exit(1)
 
 
 class BotResetView(discord.ui.View):
