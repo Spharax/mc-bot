@@ -7244,31 +7244,43 @@ async def tps_graph_follow(message, seconds):
             await asyncio.sleep(30)
             try:
                 lines = await tps_mspt_lines()
-                chart = tps_chart(seconds, "TPS")
+                chart, image = chart_file(tps_chart(seconds, "TPS"), "tps")
                 left = max(0, int(deadline - time.monotonic()))
-                await message.edit(
-                    embed=panel(f"TPS, {left // 60}m {left % 60}s left", lines, COLOR_INFO),
-                    attachments=[discord.File(io.BytesIO(chart), filename="tps.png")],
-                )
+                embed = panel(f"TPS, {left // 60}m {left % 60}s left", lines, COLOR_INFO)
+                embed.set_image(url=image)
+                await message.edit(embed=embed, attachments=[chart])
             except EDIT_ERRORS:
                 return
         try:
             lines = await tps_mspt_lines()
-            await message.edit(
-                embed=panel("TPS, 5 minutes", lines, COLOR_OK),
-                attachments=[discord.File(io.BytesIO(tps_chart(seconds, "TPS")), filename="tps.png")],
-            )
+            chart, image = chart_file(tps_chart(seconds, "TPS"), "tps")
+            embed = panel("TPS, 5 minutes", lines, COLOR_OK)
+            embed.set_image(url=image)
+            await message.edit(embed=embed, attachments=[chart])
         except EDIT_ERRORS:
             pass
     finally:
         _tps_graph_running = False
 
 
-def tps_chart(window, title):
-    """PNG of 1-minute TPS over the last `window` seconds."""
+def chart_file(png, name):
+    """A uniquely named file so Discord does not keep showing the first frame."""
 
-    cutoff = time.time() - window
-    points = [(stamp, value) for stamp, value in TPS_HISTORY if stamp >= cutoff and value is not None]
+    filename = f"{name}-{int(time.time())}.png"
+    embed_name = f"attachment://{filename}"
+    return discord.File(io.BytesIO(png), filename=filename), embed_name
+
+
+def tps_chart(window, title):
+    """PNG of TPS. The axis is the window plus a fifth, so a 5 min test is 6 min wide."""
+
+    axis = max(60, int(window * 6 / 5))
+    start = time.time() - window
+    points = [
+        (stamp, value)
+        for stamp, value in TPS_HISTORY
+        if stamp >= start and value is not None
+    ]
     width, height = 640, 240
     pixels = bytearray([18, 22, 28]) * (width * height)
 
@@ -7287,20 +7299,18 @@ def tps_chart(window, title):
         y = bottom - int((mark / 20) * (bottom - top))
         for x in range(left, right, 4):
             put(x, y, (40, 48, 58))
-    if len(points) >= 2:
-        span = max(1, points[-1][0] - points[0][0])
-        prev = None
-        for stamp, value in points:
-            x = left + int((stamp - points[0][0]) / span * (right - left - 1))
-            y = bottom - int(max(0, min(20, value)) / 20 * (bottom - top))
-            color = (80, 200, 120) if value >= 18 else (220, 160, 60) if value >= 15 else (220, 80, 80)
-            if prev:
-                x0, y0 = prev
-                steps = max(abs(x - x0), abs(y - y0), 1)
-                for step in range(steps + 1):
-                    put(x0 + (x - x0) * step // steps, y0 + (y - y0) * step // steps, color)
-            put(x, y, color)
-            prev = (x, y)
+    prev = None
+    for stamp, value in points:
+        x = left + int(max(0, min(axis, stamp - start)) / axis * (right - left - 1))
+        y = bottom - int(max(0, min(20, value)) / 20 * (bottom - top))
+        color = (80, 200, 120) if value >= 18 else (220, 160, 60) if value >= 15 else (220, 80, 80)
+        if prev:
+            x0, y0 = prev
+            steps = max(abs(x - x0), abs(y - y0), 1)
+            for step in range(steps + 1):
+                put(x0 + (x - x0) * step // steps, y0 + (y - y0) * step // steps, color)
+        put(x, y, color)
+        prev = (x, y)
     return png_bytes(width, height, pixels)
 
 
@@ -7457,8 +7467,11 @@ def dim_cmd(dimension, command):
     return f"execute in {dim} run {command}"
 
 
-def stress_graph(tps_points, ping_points):
-    """One image: TPS on the left scale, ping on the right."""
+def stress_graph(tps_points, ping_points, window, started):
+    """One image: TPS on the left scale, ping on the right.
+
+    window is the test length. The axis is that plus a fifth.
+    """
 
     width, height = 640, 220
     pixels = bytearray(bytes((16, 18, 22)) * (width * height))
@@ -7482,15 +7495,14 @@ def stress_graph(tps_points, ping_points):
         for x in range(left, right, 6):
             put(x, y, (36, 40, 46))
 
+    axis = max(60, int(window * 6 / 5))
+
     def series(points, scale, color):
         """Series."""
         usable = [(stamp, value) for stamp, value in points if value is not None]
-        if len(usable) < 2:
-            return
-        span = max(1.0, usable[-1][0] - usable[0][0])
         prev = None
         for stamp, value in usable:
-            x = left + int((stamp - usable[0][0]) / span * (right - left - 1))
+            x = left + int(max(0, min(axis, stamp - started)) / axis * (right - left - 1))
             y = bottom - int(max(0, min(scale, value)) / scale * (bottom - top))
             if prev:
                 x0, y0 = prev
@@ -7674,7 +7686,7 @@ async def stress_heavy_burst(dimension="overworld"):
         base_z = random.randint(-2000, 2000)
         y = random.randint(80, 120)
     notes = []
-    kind = random.choice(("place", "chunks", "elytra", "explode", "village", "mobs"))
+    kind = random.choice(("place", "chunks", "elytra", "explode", "village", "mobs", "redstone"))
     notes.append(f"[{dimension}]")
     if kind == "place":
         await stress_load_area(base_x, base_z, 96, dimension)
@@ -7716,6 +7728,41 @@ async def stress_heavy_burst(dimension="overworld"):
                 timeout=4,
             )
         notes.append(f"explosions at {base_x},{base_z}")
+    elif kind == "redstone":
+        await stress_load_area(base_x, base_z, 32, dimension)
+        x, z = base_x, base_z
+        await send_console(
+            dim_cmd(dimension, f"fill {x} {y} {z} {x + 12} {y} {z} minecraft:redstone_wire"),
+            timeout=6,
+        )
+        await send_console(
+            dim_cmd(dimension, f"setblock {x + 4} {y} {z} minecraft:repeater[delay=2,facing=east]"),
+            timeout=4,
+        )
+        await send_console(
+            dim_cmd(dimension, f"setblock {x + 8} {y} {z} minecraft:repeater[delay=4,facing=east]"),
+            timeout=4,
+        )
+        await send_console(
+            dim_cmd(dimension, f"setblock {x + 12} {y} {z + 1} minecraft:piston[facing=north]"),
+            timeout=4,
+        )
+        await send_console(
+            dim_cmd(dimension, f"setblock {x + 12} {y} {z - 1} minecraft:sticky_piston[facing=south]"),
+            timeout=4,
+        )
+        for _n in range(4):
+            await send_console(
+                dim_cmd(dimension, f"setblock {x - 1} {y} {z} minecraft:redstone_block"),
+                timeout=4,
+            )
+            await asyncio.sleep(0.6)
+            await send_console(
+                dim_cmd(dimension, f"setblock {x - 1} {y} {z} minecraft:air"),
+                timeout=4,
+            )
+            await asyncio.sleep(0.4)
+        notes.append(f"redstone clock at {base_x},{base_z}")
     elif kind == "village":
         await stress_load_area(base_x, base_z, 32, dimension)
         for n in range(random.randint(8, 14)):
@@ -7810,6 +7857,7 @@ async def run_stresstest(interaction, minutes):
             pass
         return
     deadline = time.monotonic() + minutes * 60
+    started_at = time.time()
     next_warn = 0.0
     tps_points, ping_points = [], []
     await stress_warn()
@@ -7857,17 +7905,18 @@ async def run_stresstest(interaction, minutes):
             except OSError:
                 pass
             left = max(0, int(deadline - time.monotonic()))
-            png = stress_graph(tps_points, ping_points)
+            png = stress_graph(tps_points, ping_points, minutes * 60, started_at)
+            chart, image = chart_file(png, "stress")
             embed = panel(
                 "Stress test",
                 [f"{left // 60}m {left % 60}s left", "Green is TPS, blue is ping.", *lines],
                 COLOR_WAIT,
             )
-            embed.set_image(url="attachment://stress.png")
+            embed.set_image(url=image)
             try:
                 await message.edit(
                     embed=embed,
-                    attachments=[discord.File(io.BytesIO(png), filename="stress.png")],
+                    attachments=[chart],
                     view=view,
                 )
             except EDIT_ERRORS:
@@ -7877,9 +7926,11 @@ async def run_stresstest(interaction, minutes):
                 except EDIT_ERRORS:
                     pass
                 try:
+                    again, again_image = chart_file(png, "stress")
+                    embed.set_image(url=again_image)
                     message = await interaction.channel.send(
                         embed=embed,
-                        file=discord.File(io.BytesIO(png), filename="stress.png"),
+                        file=again,
                         view=view,
                     )
                     status.message = message
@@ -7964,7 +8015,10 @@ async def health(interaction: discord.Interaction):
     )
     lines.extend(host_power_lines())
     lines.append(disk_usage_text())
-    await followup_embed(interaction, panel("Server health", lines[1:], COLOR_INFO))
+    chart, image = chart_file(tps_chart(300, "Health"), "health")
+    embed = panel("Server health", lines[1:], COLOR_INFO)
+    embed.set_image(url=image)
+    await interaction.followup.send(embed=embed, file=chart)
 
 
 @bot.tree.command(name="players", description="Show who is online")
@@ -8027,12 +8081,10 @@ async def tps(interaction: discord.Interaction):
         await followup_text(interaction, "A TPS graph is already running.")
         return
     _tps_graph_running = True
-    chart = tps_chart(300, "TPS")
-    message = await interaction.followup.send(
-        embed=panel("TPS, collecting 5 minutes", lines, COLOR_INFO),
-        file=discord.File(io.BytesIO(chart), filename="tps.png"),
-        wait=True,
-    )
+    chart, image = chart_file(tps_chart(300, "TPS"), "tps")
+    embed = panel("TPS, collecting 5 minutes", lines, COLOR_INFO)
+    embed.set_image(url=image)
+    message = await interaction.followup.send(embed=embed, file=chart, wait=True)
     spawn(tps_graph_follow(message, 300))
 
 
@@ -8943,11 +8995,10 @@ async def run_demand_log(interaction, session):
         await _safe_message_edit(message, session.render(title), view=None)
         if session.target == "tps":
             try:
-                chart = tps_chart(session.minutes * 60, "TPS")
-                await message.channel.send(
-                    f"TPS graph for the last {session.minutes} minutes.",
-                    file=discord.File(io.BytesIO(chart), filename="tps-log.png"),
-                )
+                chart, image = chart_file(tps_chart(session.minutes * 60, "TPS"), "tps-log")
+                embed = panel(f"TPS, last {session.minutes} min", [], COLOR_OK)
+                embed.set_image(url=image)
+                await message.channel.send(embed=embed, file=chart)
             except EDIT_ERRORS:
                 pass
 
