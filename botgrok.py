@@ -8978,6 +8978,10 @@ async def _reset_bot_soon():
     """Internal: reset bot soon."""
     await asyncio.sleep(1)
     log.warning("Resetting the bot (/botreset). The Minecraft server is not touched.")
+    try:
+        await bot.close()  # why: os._exit skips shutdown_cleanup (log flush, idle message)
+    except Exception as error:
+        log.warning("Cleanup before reset failed: %s", error)
     os._exit(1)  # non-zero so systemd Restart=on-failure starts it again
 
 
@@ -9032,9 +9036,12 @@ async def botreset(interaction: discord.Interaction):
         await deny(interaction, "Cannot reset the bot during a stress test.")
         return
     view = BotResetView()
+    note = ""
+    if current_op is not None:
+        note = f"\n[!] `/{current_op}` is still in progress and will be cut off."
     await interaction.response.send_message(
         "**Reset the bot?**\nIt goes offline, pulls the latest code from GitHub, "
-        "then systemd starts it again. The Minecraft server is not stopped.",
+        "then systemd starts it again. The Minecraft server is not stopped." + note,
         view=view,
         ephemeral=False,
     )
@@ -9963,6 +9970,7 @@ class PanelView(discord.ui.View):
         """Internal: init."""
         super().__init__(timeout=600)
         self.message = None
+        self.handed_off = False
         self.add_item(LogSelect())
 
     async def interaction_check(self, interaction):
@@ -9971,6 +9979,8 @@ class PanelView(discord.ui.View):
 
     async def on_timeout(self):
         """On timeout."""
+        if self.handed_off:
+            return  # why: console owns this message and can still be live past 10 minutes
         for child in self.children:
             child.disabled = True
         if self.message is None:
@@ -10008,7 +10018,22 @@ class PanelView(discord.ui.View):
     @discord.ui.button(label="Console", style=discord.ButtonStyle.primary, row=1)
     async def console_button(self, interaction, button):
         """Console button."""
-        await console.callback(interaction)
+        session = claim_console_slot(interaction)
+        if session is None:
+            await deny(
+                interaction,
+                f"{CONSOLE_MAX_SESSIONS} consoles are already open. Close a window first.",
+            )
+            return
+        self.handed_off = True  # why: console reuses this message; panel timeout must not overwrite it
+        self.stop()
+        try:
+            await interaction.response.defer(ephemeral=False)
+        except BaseException:
+            console_sessions.discard(session)
+            self.handed_off = False
+            raise
+        spawn(session.run())
 
     @discord.ui.button(label="Close panel", style=discord.ButtonStyle.secondary, row=3)
     async def close_panel(self, interaction, button):
