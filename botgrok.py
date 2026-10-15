@@ -2567,8 +2567,34 @@ def read_sys_int(path):
         return None
 
 
+def host_temperature():
+    """Hottest CPU thermal zone in C, or None."""
+
+    best = None
+    try:
+        zones = os.listdir("/sys/class/thermal")
+    except OSError:
+        zones = []
+    for name in zones:
+        if not name.startswith("thermal_zone"):
+            continue
+        base = os.path.join("/sys/class/thermal", name)
+        raw = read_sys_int(os.path.join(base, "temp"))
+        if raw is None:
+            continue
+        celsius = raw / 1000
+        try:
+            kind = open(os.path.join(base, "type"), encoding="utf-8").read().strip().lower()
+        except OSError:
+            kind = ""
+        score = 2 if any(word in kind for word in ("cpu", "pkg", "core", "x86")) else 1
+        if best is None or (score, celsius) > (best[0], best[1]):
+            best = (score, celsius)
+    return None if best is None else best[1]
+
+
 def host_power_lines():
-    """Battery percent, watt draw, and machine uptime. Missing sensors stay visible."""
+    """Battery percent, watt draw, temperature, and machine uptime."""
 
     lines = []
     try:
@@ -2614,6 +2640,8 @@ def host_power_lines():
     else:
         lines.append(f"Battery: {percent}%" + (f" ({status.lower()})" if status else ""))
     lines.append(f"Power: {sum(watts):.1f} W" if watts else "Power: unavailable")
+    temp = host_temperature()
+    lines.append(f"Temperature: {temp:.0f}°C" if temp is not None else "Temperature: unavailable")
     return lines
 
 
