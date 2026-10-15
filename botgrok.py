@@ -281,6 +281,8 @@ SERVER_PATTERN = (
     + re.escape(JAR_NAME)
     + r"(?: |$)"
 )
+# why: pgrep speaks POSIX ERE, which rejects (?: and treats \\s as a literal s
+PGREP_PATTERN = "java.*" + re.sub(r"([.^$*+?()[{\\|])", r"\\\1", JAR_NAME)
 SERVER_DIR = env_path("MC_SERVER_DIR")
 STATE_DIR = env_path("MC_STATE_DIR", BASE_DIR)
 BOT_LOG_DIR = env_path("MC_BOT_LOG_DIR", os.path.join(STATE_DIR, "logs"))
@@ -2475,7 +2477,7 @@ async def _pgrep_pids():
     """Internal: pgrep pids."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            "pgrep", "-f", "--", SERVER_PATTERN,
+            "pgrep", "-f", "--", PGREP_PATTERN,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
@@ -2866,7 +2868,8 @@ def is_stale_world_name(name):
     for suffix in (".old", ".old-layout"):
         if name.endswith(suffix):
             base = name[: -len(suffix)]
-            if base in ("world", "world_nether", "world_the_end") or base.startswith("world"):
+            # why: base.startswith("world") also matched worldedit.old and worldguard.old
+            if re.fullmatch(r"world(?:_nether|_the_end)?\d*", base):
                 return True
     return False
 
@@ -5697,6 +5700,10 @@ async def handle_wake(reader, writer):
             cutoff = now - WAKE_LOG_EVERY
             for ip in [ip for ip, at in _wake_logged.items() if at < cutoff]:
                 _wake_logged.pop(ip, None)
+            if len(_wake_logged) > 200:
+                oldest = sorted(_wake_logged, key=_wake_logged.get)[: len(_wake_logged) - 200]
+                for ip in oldest:
+                    _wake_logged.pop(ip, None)
     spawn(hold_join(reader, writer, raw, who, host, report))
 
 
@@ -5893,8 +5900,8 @@ async def chat_start(player):
 @bot.event
 async def on_message(message):
     """Handle Discord messages (chat relay and in-game !commands)."""
-    if (message.author.bot and message.webhook_id is None) or message.guild is None:
-        return
+    if message.author.bot or message.guild is None:
+        return  # why: a webhook can otherwise post !start and launch the server
     if GUILD_ID and message.guild.id != GUILD_ID:
         return
     if (message.content or "").strip().lower() != "!start":
@@ -5945,13 +5952,14 @@ async def chat_backup_loop():
                 if kind != "line":
                     continue
                 player, message = chat_player_message(line)
+                first = (message.split() or [""])[0].lower()
                 if player and is_backup_chat(message):
                     spawn(chat_backup_from(player))
-                elif player and message.split()[0].lower() == "!pingall":
+                elif player and first == "!pingall":
                     spawn(chat_pingall())
-                elif player and message.split()[0].lower() == "!tps":
+                elif player and first == "!tps":
                     spawn(chat_tps())
-                elif player and message.split()[0].lower() == "!start":
+                elif player and first == "!start":
                     spawn(chat_start(player))
                 if _stress_running and "joined the game" in line:
                     spawn(stress_warn())
@@ -7142,6 +7150,10 @@ async def world_map(
         return
     _map_running = True
     _map_cooldown[interaction.user.id] = now
+    if len(_map_cooldown) > 50:
+        cutoff = now - MAP_COOLDOWN * 4
+        for user_id in [uid for uid, at in _map_cooldown.items() if at < cutoff]:
+            _map_cooldown.pop(user_id, None)
     try:
         await interaction.response.defer()
         markers = []
@@ -7879,16 +7891,21 @@ async def run_stresstest(interaction, minutes):
             except asyncio.TimeoutError:
                 pass
     finally:
-        await send_console("forceload remove all", timeout=6)
-        for dim in STRESS_DIMS:
-            await send_console(dim_cmd(dim, "kill @e[type=tnt]"), timeout=4)
-            await send_console(dim_cmd(dim, "kill @e[type=villager]"), timeout=4)
-            await send_console(dim_cmd(dim, "kill @e[type=iron_golem]"), timeout=4)
-            await send_console(dim_cmd(dim, "kill @e[type=zombie]"), timeout=4)
-            await send_console(dim_cmd(dim, "kill @e[type=skeleton]"), timeout=4)
-            await send_console(dim_cmd(dim, "kill @e[type=creeper]"), timeout=4)
-        restored = await stress_restore_world(status, snapshot)
-        _stress_running = False
+        restored = False
+        try:
+            await send_console("forceload remove all", timeout=6)
+            for dim in STRESS_DIMS:
+                await send_console(dim_cmd(dim, "kill @e[type=tnt]"), timeout=4)
+                await send_console(dim_cmd(dim, "kill @e[type=villager]"), timeout=4)
+                await send_console(dim_cmd(dim, "kill @e[type=iron_golem]"), timeout=4)
+                await send_console(dim_cmd(dim, "kill @e[type=zombie]"), timeout=4)
+                await send_console(dim_cmd(dim, "kill @e[type=skeleton]"), timeout=4)
+                await send_console(dim_cmd(dim, "kill @e[type=creeper]"), timeout=4)
+            restored = await stress_restore_world(status, snapshot)
+        except Exception:
+            log.exception("Stress restore failed")
+        finally:
+            _stress_running = False  # why: a raise above used to leave every command refused
         view.stop()
         done = [
             f"Snapshot: `{os.path.basename(snapshot)}`",
@@ -9228,11 +9245,13 @@ def blocked_console_command(command):
         return None
     if words[0] in CONSOLE_BLOCKED:
         return CONSOLE_BLOCKED[words[0]]
-    # why: `execute ... run stop` is still a stop even though the first word is execute
-    if "run" in words:
-        after = words[words.index("run") + 1:]
-        if after and after[0] in CONSOLE_BLOCKED:
-            return CONSOLE_BLOCKED[after[0]]
+    # why: walk every run, so execute run execute run stop is still a stop
+    for index, word in enumerate(words):
+        if word != "run" or index + 1 >= len(words):
+            continue
+        nxt = words[index + 1]
+        if nxt in CONSOLE_BLOCKED:
+            return CONSOLE_BLOCKED[nxt]
     return None
 
 
