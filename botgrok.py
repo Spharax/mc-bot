@@ -4875,8 +4875,12 @@ def backup_sources():
     return found
 
 
-def _copy_into(src, dest_dir):
-    """Copy one file or directory into dest_dir. Skips the backup folder itself."""
+def _copy_into(src, dest_dir, deadline=None):
+    """Copy one file or directory into dest_dir. Skips the backup folder itself.
+
+    deadline is a monotonic timestamp. The copy raises TimeoutError once it
+    is past, because asyncio.to_thread cannot cancel a stuck copy.
+    """
 
     name = os.path.basename(src.rstrip(os.sep)) or "backup-item"
     target = os.path.join(dest_dir, name)
@@ -4891,11 +4895,20 @@ def _copy_into(src, dest_dir):
                 dropped.append(item)
         return dropped
 
+    def copy_with_deadline(src_path, dst_path, *, follow_symlinks=True):
+        # why: to_thread cannot be cancelled, so the copy itself must notice the deadline
+        if deadline is not None and time.monotonic() > deadline:
+            raise TimeoutError(f"backup copy exceeded {BACKUP_TIMEOUT}s")
+        return shutil.copy2(src_path, dst_path, follow_symlinks=follow_symlinks)
+
     if os.path.isdir(src):
-        shutil.copytree(src, target, ignore=ignore, dirs_exist_ok=True)
+        shutil.copytree(
+            src, target, ignore=ignore, dirs_exist_ok=True,
+            copy_function=copy_with_deadline,
+        )
     elif os.path.isfile(src):
         os.makedirs(dest_dir, exist_ok=True)
-        shutil.copy2(src, target)
+        copy_with_deadline(src, os.path.join(dest_dir, name))
     else:
         raise FileNotFoundError(src)
     return target
@@ -4918,15 +4931,28 @@ async def perform_backup(kind):
     await save_backup_state_async()
     stamp = time.strftime("%Y-%m-%d %H-%M")
     folder = os.path.join(BACKUP_DIR, backup_folder_name(kind, number, stamp))
+    deadline = time.monotonic() + BACKUP_TIMEOUT
+    try:
+        need = await asyncio.to_thread(
+            lambda: sum(folder_size(src) if os.path.isdir(src) else os.path.getsize(src) for src in sources)
+        )
+        free = shutil.disk_usage(os.path.dirname(folder) or ".").free
+        if free < need:
+            # why: a copy that fills the disk holds the lock and, for manual backups, leaves autosave off
+            return 1, f"not enough free disk ({free} free, {need} needed)".encode(), folder
+    except OSError as error:
+        log.warning("Couldn't check free disk before backup: %s", error)
     try:
         os.makedirs(folder, exist_ok=False)
         for src in sources:
-            await asyncio.to_thread(_copy_into, src, folder)
+            await asyncio.to_thread(_copy_into, src, folder, deadline)
         manifest = os.path.join(folder, "backup.txt")
         with open(manifest, "w", encoding="utf-8") as file:
             file.write(f"kind={kind}\nnumber={number}\nwhen={stamp}\n")
             file.write("sources\n")
             file.writelines(src + "\n" for src in sources)
+    except TimeoutError:
+        return None, f"timed out after {BACKUP_TIMEOUT}s".encode(), folder
     except OSError as error:
         return 1, str(error).encode(), folder
     if not BACKUP_COMMAND:
@@ -5498,15 +5524,15 @@ def _packet(packet_id, payload):
     return _varint(len(body)) + body
 
 
-def offline_status_packet():
+def offline_status_packet(protocol=777, name="26.3"):
     """Answer a server-list refresh without starting anything.
 
-    Protocol 777 is Paper 26.3. A -1 protocol makes the client mark the
-    server incompatible and it may never send the login packet.
+    Prefer the protocol from the client's handshake. A -1 protocol makes the
+    client mark the server incompatible and it may never send the login packet.
     """
 
     body = json.dumps({
-        "version": {"name": "26.3", "protocol": 777},
+        "version": {"name": name, "protocol": protocol},
         "players": {"max": 20, "online": 0, "sample": []},
         "description": {"text": "Offline. Joining will start the server."},
     })
@@ -5554,12 +5580,12 @@ async def handshake_intent(reader):
         raise ValueError("bad varint")
 
     if take() != 0:
-        return raw, None
-    take()  # protocol version
+        return raw, None, None
+    protocol = take()
     size = take()
     pos += size  # server address
     pos += 2  # port
-    return raw, take()
+    return raw, take(), protocol
 
 
 _wake_server = None
@@ -5601,7 +5627,7 @@ async def handle_wake(reader, writer):
     peer = writer.get_extra_info("peername")
     who = peer[0] if peer else "unknown"
     try:
-        raw, intent = await asyncio.wait_for(handshake_intent(reader), timeout=15)
+        raw, intent, protocol = await asyncio.wait_for(handshake_intent(reader), timeout=15)
     except (OSError, asyncio.TimeoutError, asyncio.IncompleteReadError, ValueError, IndexError) as error:
         log.warning("Wake: bad handshake from %s: %s", who, error)
         writer.close()
@@ -5609,9 +5635,15 @@ async def handle_wake(reader, writer):
     log.info("Wake: %s sent intent %s", who, intent)
     if intent not in (2, 3):
         try:
-            writer.write(offline_status_packet())
+            # why: closing with the status request unread can RST the socket, so the MOTD never shows
+            await asyncio.wait_for(reader.read(256), timeout=2)
+            writer.write(offline_status_packet(protocol or 777))
             await writer.drain()
-        except OSError as error:
+            ping = await asyncio.wait_for(reader.read(32), timeout=2)
+            if ping:
+                writer.write(ping)  # echo the ping so the client finishes the status exchange
+                await writer.drain()
+        except (OSError, asyncio.TimeoutError) as error:
             log.warning("Wake: status reply to %s failed: %s", who, error)
         writer.close()
         return
@@ -5655,7 +5687,11 @@ async def server_accepting(port):
 
 
 async def hold_join(reader, writer, raw, who):
-    """Keep the client on the connecting screen, then splice it to the real server."""
+    """Keep the client on the connecting screen, then splice it to the real server.
+
+    The client stays proxied through this bot for the session, so the server
+    sees 127.0.0.1. An ip-ban on that address would block later wake joins.
+    """
 
     global _wake_holds
     # why: handle_wake already incremented; this task only decrements in finally
@@ -5945,8 +5981,18 @@ def recent_backups(limit=5, complete_only=True):
 
 # Backed up next to the worlds but never restored: a restore must not roll back
 # plugins, configs or server.properties (RCON settings live there).
-# why: old-layout servers back up world_nether/world_the_end; skipping them on restore leaves dimensions inconsistent. remove_legacy_dimension_folders() still cleans leftovers on Paper 26 nested layout.
 RESTORE_SKIP = frozenset(BACKUP_DIRS) | frozenset(BACKUP_FILES) | {"backup.txt", "failed.log"}
+LEGACY_DIM_FOLDERS = frozenset({"world_nether", "world_the_end"})
+
+
+def backup_uses_nested_dims(folder):
+    """True if this backup stores Nether/End inside world/dimensions."""
+
+    nested = os.path.join(folder, "world", "dimensions", "minecraft")
+    return (
+        os.path.isdir(os.path.join(nested, "the_nether"))
+        or os.path.isdir(os.path.join(nested, "the_end"))
+    )
 
 
 def restore_backup_folder(folder):
@@ -5960,10 +6006,14 @@ def restore_backup_folder(folder):
 
     root = server_root()
     stamp = time.strftime("%Y%m%d-%H%M%S")
+    skip = set(RESTORE_SKIP)
+    if backup_uses_nested_dims(folder):
+        # why: nested backup already has nether/end inside world/; restoring world_nether would duplicate. Old layout must restore them or the dimensions stay at the live state.
+        skip |= LEGACY_DIM_FOLDERS
     names = [
         name
         for name in sorted(os.listdir(folder))
-        if name not in RESTORE_SKIP and os.path.isdir(os.path.join(folder, name))
+        if name not in skip and os.path.isdir(os.path.join(folder, name))
     ]
     if not names:
         raise OSError("this backup contains no world folders")
@@ -9193,24 +9243,29 @@ CHAT_CONSOLE_COMMANDS = frozenset({
 def _console_word(raw):
     """Internal: console word."""
     word = raw.lower()
-    if word.startswith("minecraft:"):
-        word = word[len("minecraft:"):]
+    if ":" in word:
+        word = word.split(":", 1)[1]  # why: spigot:restart / bukkit:stop must not bypass the block
     return word
 
 
 def blocked_console_command(command):
-    """stop/restart as its own word, including `execute ... stop`.
+    """stop/restart as the first word, or after `execute ... run`.
 
     Chat commands may contain those words. A console stop looks like a crash
     and would be auto-restarted, so it has to go through /stop or /restart.
+    Only the first word is matched, so `spark profiler stop` is allowed.
     """
 
     words = [_console_word(part) for part in command.split()]
     if not words or words[0] in CHAT_CONSOLE_COMMANDS:
         return None
-    for word in words:
-        if word in CONSOLE_BLOCKED:
-            return CONSOLE_BLOCKED[word]
+    if words[0] in CONSOLE_BLOCKED:
+        return CONSOLE_BLOCKED[words[0]]
+    # why: `execute ... run stop` is still a stop even though the first word is execute
+    if "run" in words:
+        after = words[words.index("run") + 1:]
+        if after and after[0] in CONSOLE_BLOCKED:
+            return CONSOLE_BLOCKED[after[0]]
     return None
 
 
