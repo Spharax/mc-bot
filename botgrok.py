@@ -3665,8 +3665,11 @@ async def say_game(text, prefix="[bot]"):
     return ok
 
 
-async def say_bot(text):
-    """Say one line in Minecraft. Every bot line starts with [bot-warn]:."""
+async def say_bot(text, color=None):
+    """Say one line in Minecraft. Every bot line starts with [bot-warn]:.
+
+    color is a tellraw color (red, green) so the line is actually colored.
+    """
 
     body = clean_chat(text, 200)
     if body.lower().startswith("[bot-warn]"):
@@ -3675,7 +3678,11 @@ async def say_bot(text):
     if not RCON_PASSWORD:
         return False, "RCON isn't configured."
     try:
-        await rcon.command(f"say {payload}")
+        if color:
+            raw = json.dumps({"text": payload, "color": color})
+            await rcon.command(f"tellraw @a {raw}")
+        else:
+            await rcon.command(f"say {payload}")
     except RCON_ERRORS as error:
         warn_throttled(
             "say-bot",
@@ -4192,7 +4199,7 @@ async def health_tick():
                 footer=f"Incident {state.incident} · opened {opened} · repeats every {HEALTH_COOLDOWN}s",
             )
         )
-        await say_bot(" | ".join(problems))
+        await say_bot("server health is low", color="red")
     elif state.alerting:
         players = None
         try:
@@ -4201,7 +4208,7 @@ async def health_tick():
             pass
         stats = health_stats(None, probe, rss_kb, cpu, cpu_total, memory, players, xmx_kb)
         await close_health_incident(state, "Back to normal.", stats)
-        await say_bot("Server health is back to normal.")
+        await say_bot("server health returned back to normal", color="green")
 
 
 async def close_health_incident(state, reason, stats=None):
