@@ -5461,14 +5461,14 @@ async def run_text_start(who, reply):
     if _stress_running:
         # why: snapshot and restore stop the server; a start then corrupts the world
         await reply("a stress test is running")
-        return
+        return "busy"
     if not try_lock("start"):
         await reply("start already running")
-        return
+        return "busy"
     try:
         if await server_running(force=True):
             await reply("server is already running")
-            return
+            return "already running"
         await reply(f"{who} is starting the server")
         await cancel_idle_shutdown("!start")
 
@@ -5480,7 +5480,7 @@ async def run_text_start(who, reply):
 
         if not await wait_until_fully_stopped(ReplyStatus()):
             await reply("the old server did not finish shutting down")
-            return
+            return "failed"
         clear_controlled_stop()
         await close_wake_listener()
         await asyncio.to_thread(remove_legacy_dimension_folders)
@@ -5492,14 +5492,15 @@ async def run_text_start(who, reply):
             await launch_server()
         except OSError as error:
             await reply(f"couldn't start the server: {error}")
-            return
+            return "failed"
         deadline = time.monotonic() + START_TIMEOUT
         while time.monotonic() < deadline:
             if await server_running(force=True) and b"Done (" in _log_from(LOG_PATH, mark):
                 await reply("server is ready")
-                return
+                return "started"
             await asyncio.sleep(POLL_INTERVAL)
         await reply("server did not finish starting")
+        return "failed"
     finally:
         release()
 
@@ -5596,16 +5597,21 @@ async def handshake_intent(reader):
         raise ValueError("bad varint")
 
     if take() != 0:
-        return raw, None, None
+        return raw, None, None, ""
     protocol = take()
     size = take()
+    address = data[pos:pos + size].decode("utf-8", "replace").split("\x00", 1)[0]
     pos += size  # server address
     pos += 2  # port
-    return raw, take(), protocol
+    return raw, take(), protocol, address
 
 
 _wake_server = None
 _wake_holds = 0
+_wake_logged = {}          # ip -> last audit log time
+_status_pings = 0
+_status_summary_at = 0.0
+WAKE_LOG_EVERY = 60
 
 
 async def close_wake_listener():
@@ -5643,13 +5649,22 @@ async def handle_wake(reader, writer):
     peer = writer.get_extra_info("peername")
     who = peer[0] if peer else "unknown"
     try:
-        raw, intent, protocol = await asyncio.wait_for(handshake_intent(reader), timeout=15)
+        raw, intent, protocol, host = await asyncio.wait_for(handshake_intent(reader), timeout=15)
     except (OSError, asyncio.TimeoutError, asyncio.IncompleteReadError, ValueError, IndexError) as error:
         log.warning("Wake: bad handshake from %s: %s", who, error)
         writer.close()
         return
-    log.info("Wake: %s sent intent %s", who, intent)
+    host = host or "?"
     if intent not in (2, 3):
+        global _status_pings, _status_summary_at
+        _status_pings += 1
+        log.debug("Wake: status from %s host %s", who, host)
+        now = time.monotonic()
+        if now - _status_summary_at >= WAKE_LOG_EVERY:
+            if _status_pings:
+                log.info("Wake: %s status pings in the last minute", _status_pings)
+            _status_pings = 0
+            _status_summary_at = now
         try:
             # why: closing with the status request unread can RST the socket, so the MOTD never shows
             await asyncio.wait_for(reader.read(256), timeout=2)
@@ -5663,10 +5678,19 @@ async def handle_wake(reader, writer):
             log.warning("Wake: status reply to %s failed: %s", who, error)
         writer.close()
         return
-    log.info("Wake: login from %s, starting the server", who)
     global _wake_holds
     _wake_holds += 1  # why: increment before spawn so wake_on_ping_loop cannot see 0 and rebind
-    spawn(hold_join(reader, writer, raw, who))
+    now = time.monotonic()
+    report = now - _wake_logged.get(who, 0) >= WAKE_LOG_EVERY
+    if report:
+        _wake_logged[who] = now
+        # why: raw IPs go to the audit channel, not the public alert channel
+        cmd_log.info("Wake: ping by %s host %s, server is starting", who, host)
+        if len(_wake_logged) > 200:
+            cutoff = now - WAKE_LOG_EVERY
+            for ip in [ip for ip, at in _wake_logged.items() if at < cutoff]:
+                _wake_logged.pop(ip, None)
+    spawn(hold_join(reader, writer, raw, who, host, report))
 
 
 def _log_from(path, offset):
@@ -5702,7 +5726,7 @@ async def server_accepting(port):
     return None
 
 
-async def hold_join(reader, writer, raw, who):
+async def hold_join(reader, writer, raw, who, host="?", report=True):
     """Keep the client on the connecting screen, then splice it to the real server.
 
     The client stays proxied through this bot for the session, so the server
@@ -5732,7 +5756,7 @@ async def hold_join(reader, writer, raw, who):
     soaker = asyncio.create_task(soak())
     upstream = None
     try:
-        ready = await wake_start(who)
+        ready = await wake_start(who, host, report)
         if client_gone:
             return
         if not ready:
@@ -5787,31 +5811,40 @@ async def hold_join(reader, writer, raw, who):
             pass
 
 
-async def wake_start(who):
+async def wake_start(who, host="?", report=True):
     """Free the port, then start. A second join waits for the start already running."""
 
     await close_wake_listener()
-    notes = []
+    started = time.monotonic()
 
     async def reply(text):
         """Reply."""
-        notes.append(text)
-        # Do not wait on Discord. A slow or dead link must not stall the held join.
-        spawn(send_alert(f"Join from `{who}`: {text}"))
+        # why: the IP is on the audit log; the alert is one line with no raw address
+        spawn(send_alert(text))
 
-    await run_text_start(f"join from {who}", reply)
-    if any("server is ready" in note or "already running" in note for note in notes):
+    result = await run_text_start("a join", reply)
+    elapsed = time.monotonic() - started
+    if result in ("started", "already running"):
+        if report:
+            cmd_log.info("Wake: %s host %s server ready after %.0fs (%s)", who, host, elapsed, result)
         return True
-    if any("start already running" in note for note in notes):
+    if result == "busy":
         deadline = time.monotonic() + START_TIMEOUT
         while time.monotonic() < deadline:
             if await server_running(force=True):
                 data = _read_tail(LOG_PATH, 64 * 1024) or b""
                 if b"Done (" in data:
+                    if report:
+                        cmd_log.info(
+                            "Wake: %s host %s server ready after %.0fs (waited)",
+                            who, host, time.monotonic() - started,
+                        )
                     return True
             if current_op != "start" and not await server_running(force=True):
-                return False
+                break
             await asyncio.sleep(POLL_INTERVAL)
+    if report:
+        cmd_log.info("Wake: %s host %s server did not start (%s)", who, host, result)
     return False
 
 
