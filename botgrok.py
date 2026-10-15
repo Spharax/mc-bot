@@ -8031,6 +8031,22 @@ def clean_chat(text, limit):
     return text[:limit]
 
 
+recent_chat = collections.deque(maxlen=12)
+
+
+def recent_server_texts(limit=8):
+    """Last chat lines from the server log, oldest first."""
+
+    lines = []
+    data = _read_tail(LOG_PATH, 64 * 1024)
+    if data:
+        for raw in data.decode("utf-8", "replace").splitlines():
+            player, msg = chat_player_message(raw)
+            if player and msg:
+                lines.append(f"{player}: {msg}")
+    return lines[-limit:]
+
+
 @bot.tree.command(name="say", description="Send a message to Minecraft chat")
 @app_commands.describe(message="What to say in game")
 async def say(interaction: discord.Interaction, message: str):
@@ -8048,15 +8064,21 @@ async def say(interaction: discord.Interaction, message: str):
         return
 
     await interaction.response.defer()
-    ok, detail = await say_bot(f"[Discord] {name}: {clean}")
-    if not ok:
+    spoken = f"{name}: {clean}"
+    try:
+        await rcon.command("tellraw @a " + json.dumps({"text": spoken}))
+    except RCON_ERRORS as error:
         await followup_text(
             interaction,
-            f"Couldn't reach RCON.\n{detail}\nRun `/rcontest` to see why.",
+            f"Couldn't reach RCON.\n{describe_rcon_error(error)}\nRun `/rcontest` to see why.",
         )
         return
+    recent_chat.append(spoken)
+    lines = recent_server_texts()
+    if spoken not in lines:
+        lines.append(spoken)
     await followup_embed(
-        interaction, panel("Sent in game", [detail.replace("`", "'")], COLOR_OK)
+        interaction, panel("Chat", lines[-8:] or [spoken], COLOR_OK)
     )
 
 
