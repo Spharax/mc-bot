@@ -4396,6 +4396,7 @@ COMMANDS = (
     "/backup restore  restore a backup\n"
     "/say  send a line to Minecraft chat\n"
     "/chatclear  clear the Minecraft chat channel\n"
+    "/logdelete  delete every log file\n"
     "/log  log one system for 20 minutes\n"
     "/log tps  longer TPS graph\n"
     "/stresstest  4-player load, network, health log\n"
@@ -9209,6 +9210,115 @@ async def run_demand_log(interaction, session):
                 await message.channel.send(embed=embed, file=chart)
             except EDIT_ERRORS:
                 pass
+
+
+def _log_targets():
+    """Every log file this bot or the server owns."""
+
+    paths = []
+    seen = set()
+
+    def add(path):
+        if not path:
+            return
+        path = os.path.abspath(path)
+        if path in seen:
+            return
+        seen.add(path)
+        paths.append(path)
+
+    for path in (LOG_PATH, START_LOG, MANUAL_LOG_PATH, BOT_LOG_FILE):
+        add(path)
+        for index in range(1, 40):
+            add(f"{path}.{index}")
+    dirs = [
+        os.path.dirname(LOG_PATH),
+        BOT_LOG_DIR,
+        os.path.join(os.path.dirname(os.path.dirname(LOG_PATH)), "crash-reports"),
+    ]
+    for directory in dirs:
+        if not directory or not os.path.isdir(directory):
+            continue
+        for name in os.listdir(directory):
+            if name.endswith((".log", ".log.gz", ".txt")) or ".log." in name:
+                add(os.path.join(directory, name))
+    return paths
+
+
+def delete_all_logs():
+    """Delete every log file. Live logs are truncated so writers keep their handle."""
+
+    live = {os.path.abspath(path) for path in (LOG_PATH, START_LOG, BOT_LOG_FILE, MANUAL_LOG_PATH) if path}
+    removed, truncated, failed = [], [], []
+    for path in _log_targets():
+        if not os.path.isfile(path):
+            continue
+        try:
+            if path in live:
+                with open(path, "w", encoding="utf-8"):
+                    pass
+                truncated.append(os.path.basename(path))
+            else:
+                os.remove(path)
+                removed.append(os.path.basename(path))
+        except OSError as error:
+            failed.append(f"{os.path.basename(path)}: {error}")
+    return removed, truncated, failed
+
+
+class LogDeleteView(discord.ui.View):
+    """Confirm before wiping every log file."""
+
+    def __init__(self):
+        super().__init__(timeout=30)
+        self.message = None
+
+    @discord.ui.button(label="Delete all logs", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction, button):
+        if not await gate(interaction, admin=True):
+            return
+        self.stop()
+        removed, truncated, failed = await asyncio.to_thread(delete_all_logs)
+        lines = [
+            f"Deleted {len(removed)} file{'s' if len(removed) != 1 else ''}.",
+            f"Cleared {len(truncated)} live log{'s' if len(truncated) != 1 else ''}.",
+        ]
+        if failed:
+            lines.append("Failed: " + ", ".join(failed[:8]))
+        cmd_log.warning("/logdelete by %s: removed=%s truncated=%s", describe_user(interaction.user), len(removed), len(truncated))
+        await interaction.response.edit_message(content="\n".join(lines), view=None)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction, button):
+        if not await gate(interaction, admin=True):
+            return
+        self.stop()
+        await interaction.response.edit_message(content="Cancelled. Logs were kept.", view=None)
+
+    async def on_timeout(self):
+        if self.message is not None:
+            try:
+                await self.message.edit(content="Timed out. Logs were kept.", view=None)
+            except EDIT_ERRORS:
+                pass
+
+
+@bot.tree.command(name="logdelete", description="Delete every bot and server log file")
+async def logdelete(interaction: discord.Interaction):
+    """Slash command: wipe local log files after a confirm."""
+    if not await gate(interaction, admin=True):
+        return
+    view = LogDeleteView()
+    await interaction.response.send_message(
+        "**Delete all log files?**\n"
+        "This removes bot logs, the start log, the manual log, Minecraft log archives, "
+        "and crash reports. The live logs are emptied, not unlinked.",
+        view=view,
+    )
+    try:
+        view.message = await interaction.original_response()
+    except EDIT_ERRORS:
+        pass
 
 
 @bot.tree.command(name="log", description="Start a short log for one system")
