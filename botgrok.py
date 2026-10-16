@@ -32,6 +32,8 @@ Environment (see .env next to this file):
   MC_BACKUP_TIMEOUT        seconds, default 600
   MC_BACKUP_KEEP           finished backups kept per kind (auto, manual), default 20;
                            older ones are deleted after a successful backup. 0 = keep all
+  MC_RESTORE_DELETE        delete the old worlds after a successful restore, default true.
+                           Set false (or RESTOREDELETE=false) to keep the *.before-restore copies.
   MC_CHAT_BACKUP           in-game !backup / !pingall / !tps / !start for any player, default true
   MC_START_CHANNEL_ID      Discord channel that accepts !start, default 1556021831218110564
   MC_CHAT_BACKUP_COOLDOWN  seconds between in-game !backup runs, default 600
@@ -316,6 +318,8 @@ CHAT_BACKUP = env_bool("MC_CHAT_BACKUP", True)
 WAKE_ON_PING = env_bool("MC_WAKE_ON_PING", True)
 START_CHANNEL_ID = env_int("MC_START_CHANNEL_ID", 1556021831218110564)
 CHAT_CHANNEL_ID = env_int("MC_CHAT_CHANNEL_ID", 0)
+# Missing entry means delete. Only an explicit false keeps the old worlds.
+RESTORE_DELETE = env_bool("MC_RESTORE_DELETE", True) and env_bool("RESTOREDELETE", True)
 _chat_bridge = False  # on while the Minecraft server is up
 BACKUP_TIMEOUT = env_int("MC_BACKUP_TIMEOUT", 600, 1)
 # Finished backups kept per kind (auto / manual); older ones are deleted after a
@@ -2963,7 +2967,8 @@ def clean_stale_world_folders():
     """Delete leftover world copies before start.
 
     Only known world folders ending in .old or .old-layout.
-    *.before-restore copies are kept as a restore safety net.
+    *.before-restore copies are deleted after a successful restore unless
+    MC_RESTORE_DELETE is false.
     """
 
     root = server_root()
@@ -6311,8 +6316,8 @@ def restore_backup_folder(folder):
                 moved.append((dest, aside))
             created.append(dest)
             shutil.copytree(os.path.join(folder, name), dest)
-        # Copy succeeded. Keep the *.before-restore asides as a safety net.
-        # Do not delete them here.
+        # Copy succeeded. Asides stay until after this try, so a later
+        # failure can still roll the old worlds back.
     except Exception:
         for path in reversed(created):
             shutil.rmtree(path, ignore_errors=True)
@@ -6322,9 +6327,13 @@ def restore_backup_folder(folder):
             except OSError:
                 log.error("Restore rollback: couldn't move %s back to %s", aside, dest)
         raise
-    # Cleanup of leftover .old / .old-layout folders happens after a successful
-    # restore, outside the try, so a late failure cannot destroy both copies.
+    # Cleanup sits outside the try so a late failure cannot destroy both copies.
     try:
+        if RESTORE_DELETE:
+            for dest, aside in moved:
+                if os.path.isdir(aside):
+                    shutil.rmtree(aside, ignore_errors=True)
+                    log.debug("Removed pre-restore world %s", aside)
         for name in os.listdir(root):
             path = os.path.join(root, name)
             if is_stale_world_name(name) and os.path.isdir(path):
@@ -6408,8 +6417,12 @@ class RestoreSelect(discord.ui.Select):
             content=(
                 f"**Restored backup {serial}.** `{name}`\n"
                 f"Replaced: {', '.join(copied) or 'nothing'}\n"
-                "Old worlds were renamed `*.before-restore` (with a timestamp if that "
-                "name was taken). Plugins and config were not touched. Start the server when ready."
+                + (
+                    "Old worlds were deleted."
+                    if RESTORE_DELETE else
+                    "Old worlds were kept as `*.before-restore`."
+                )
+                + " Plugins and config were not touched. Start the server when ready."
             ),
             embed=None,
             view=None,
