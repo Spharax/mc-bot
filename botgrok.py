@@ -6131,11 +6131,20 @@ async def relay_mc_chat(player, message):
 
 
 async def relay_discord_chat(name, message):
-    """Send one Discord line into Minecraft chat."""
+    """Send one Discord line into Minecraft chat.
+
+    tellraw, not say: Paper prefixes an RCON `say` with [Rcon].
+    """
 
     body = clean_chat(f"<{name}> {message}", 200)
     if not body:
         return
+    if RCON_PASSWORD:
+        try:
+            await rcon.command("tellraw @a " + json.dumps({"text": body}))
+            return
+        except RCON_ERRORS as error:
+            log.warning("Discord chat tellraw failed: %s", describe_rcon_error(error))
     ok, _output = await send_console(f"say {body}")
     if not ok:
         log.warning("Discord chat not delivered: %s", body)
