@@ -2855,6 +2855,47 @@ def format_players(info):
 # START SCRIPT
 # ============================================================
 
+def detach_from_bot_cgroup(pid):
+    """Move a process out of this service so a bot restart does not kill it.
+
+    systemd's default KillMode=control-group kills every process in the unit,
+    including a Minecraft server the bot started.
+    """
+
+    try:
+        raw = open(f"/proc/{pid}/cgroup", encoding="utf-8").read().strip().splitlines()
+    except OSError:
+        return False
+    rel = raw[-1].split(":", 2)[-1] if raw else ""
+    if not rel or rel == "/":
+        return True
+    parent = os.path.dirname("/sys/fs/cgroup" + rel)
+    try:
+        with open(os.path.join(parent, "cgroup.procs"), "a", encoding="utf-8") as file:
+            file.write(f"{pid}\n")
+        return True
+    except OSError as error:
+        log.warning(
+            "Couldn't move pid %s out of the bot cgroup (%s). "
+            "Add KillMode=process to mcbot.service or /botreset will stop Minecraft.",
+            pid, error,
+        )
+        return False
+
+
+def detach_server_tree(pid):
+    """Detach the server and the tmux parent that owns it."""
+
+    moved = detach_from_bot_cgroup(pid)
+    try:
+        parent = int(open(f"/proc/{pid}/stat", encoding="utf-8").read().rsplit(")", 1)[1].split()[1])
+    except (OSError, IndexError, ValueError):
+        parent = None
+    if parent and parent > 1:
+        moved = detach_from_bot_cgroup(parent) or moved
+    return moved
+
+
 async def launch_server():
     """Start the Minecraft server via the configured start script."""
     # A new JVM must not inherit the excuse recorded for the process we stopped.
@@ -2865,6 +2906,14 @@ async def launch_server():
     except OSError:
         log_offset = 0
 
+    # why: a transient service is outside this unit, so /botreset does not kill it
+    argv = [START_SCRIPT]
+    if shutil.which("systemd-run"):
+        argv = [
+            "systemd-run", "--collect", "--unit", f"mc-server-{int(time.time())}",
+            "--description", "Minecraft server",
+            START_SCRIPT,
+        ]
     log.info("Launching the start script %s (output: %s)", START_SCRIPT, START_LOG)
     rotate_capped(START_LOG, START_LOG_MAX_BYTES, LOG_KEEP_HIGH)
     logfile = open(START_LOG, "ab")
@@ -2874,7 +2923,7 @@ async def launch_server():
         )
         logfile.flush()
         proc = await asyncio.create_subprocess_exec(
-            START_SCRIPT,
+            *argv,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=logfile,
             stderr=logfile,
@@ -9197,6 +9246,12 @@ async def _reset_bot_soon():
     """Internal: reset bot soon."""
     await asyncio.sleep(1)
     log.warning("Resetting the bot (/botreset). The Minecraft server is not touched.")
+    try:
+        pid = await find_server_pid(force=True)
+    except AmbiguousServer:
+        pid = None
+    if pid:
+        detach_server_tree(pid)  # why: systemd would otherwise kill it with the bot
     try:
         await asyncio.wait_for(shutdown_cleanup(), timeout=5)
     except Exception as error:
