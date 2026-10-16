@@ -69,4 +69,6 @@ See the module docstring at the top of `botgrok.py` for the full list and defaul
 
 ## License
 
-Use and modify as you like. Do not commit `.env`.
+[MIT](LICENSE) © 2026 Spharax
+
+Do not commit `.env`.
