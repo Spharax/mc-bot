@@ -544,7 +544,7 @@ async def log_prune_loop():
         try:
             removed = await asyncio.to_thread(prune_local_logs)
             if removed:
-                log.info("Pruned %s old local log file(s)", removed)
+                log.debug("Pruned %s old local log file(s)", removed)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -626,7 +626,7 @@ class MCCommandTree(app_commands.CommandTree):
     async def interaction_check(self, interaction):
         """Interaction check."""
         try:
-            cmd_log.info(
+            cmd_log.debug(
                 "%s %s by %s (guild %s, channel %s)",
                 command_label(interaction),
                 format_args(interaction),
@@ -707,10 +707,10 @@ class MCServerBot(discord.Client):
             # Guild sync plus leftover global commands shows each command twice.
             self.tree.clear_commands(guild=None)
             await self.tree.sync()
-            log.info("Slash commands synced to guild %s and cleared globally", GUILD_ID)
+            log.debug("Slash commands synced to guild %s and cleared globally", GUILD_ID)
         else:
             await self.tree.sync()
-            log.info("Global slash commands synced")
+            log.debug("Global slash commands synced")
 
     async def _start_background(self):
         """Internal: start background."""
@@ -724,11 +724,11 @@ class MCServerBot(discord.Client):
             spawn(chat_backup_loop())
         if WAKE_ON_PING:
             spawn(wake_on_ping_loop())
-            log.info("Wake on join: a Minecraft join attempt starts the server")
+            log.debug("Wake on join: a Minecraft join attempt starts the server")
         if AUDIT_CHANNEL_ID:
             start_audit_relay()
         self.prune_task = asyncio.create_task(log_prune_loop())
-        log.info(
+        log.debug(
             "Local logs: keep %s normal, %s high-volume, prune every %ss. "
             "Discord history is not deleted.",
             LOG_KEEP,
@@ -738,7 +738,7 @@ class MCServerBot(discord.Client):
 
         if HEALTH_ALERTS:
             self.health_task = asyncio.create_task(health_loop())
-            log.info(
+            log.debug(
                 "Health alerts on: RSS above the heap (or %s%% of system RAM if -Xmx is unknown), "
                 "TPS<%s, stuck>=%ss (CPU is only reported) "
                 "(every %ss, at most one message per %ss)%s",
@@ -753,7 +753,7 @@ class MCServerBot(discord.Client):
         # setup_hook runs once, unlike on_ready which fires on every reconnect.
         if ALERT_CHANNEL_ID or AUTO_RESTART or IDLE_ACTIVE or AUTO_BACKUP:
             self.monitor_task = asyncio.create_task(monitor_loop())
-            log.info(
+            log.debug(
                 "Monitor started (alerts=%s, auto-restart=%s, idle-shutdown=%s, auto-backup=%s)",
                 bool(ALERT_CHANNEL_ID),
                 AUTO_RESTART,
@@ -801,13 +801,13 @@ def install_loop_handlers(loop):
 
 def log_startup_banner():
     """Log the version and configuration banner."""
-    log.info(
+    log.debug(
         "Starting MC bot %s (python %s, discord.py %s)",
         VERSION,
         sys.version.split()[0],
         discord.__version__,
     )
-    log.info(
+    log.debug(
         "Config: server log=%s | tmux session=%s | rcon=%s | idle-shutdown=%s | "
         "auto-restart=%s | admin role=%s | alert=%s | audit=%s | log=%s",
         LOG_PATH,
@@ -821,7 +821,7 @@ def log_startup_banner():
         LOG_CHANNEL_ID or "none",
     )
     if BOT_LOG_FILE:
-        log.info(
+        log.debug(
             "Writing the bot log to %s (level %s)",
             BOT_LOG_FILE,
             logging.getLevelName(FILE_LEVEL),
@@ -874,9 +874,9 @@ def log_startup_notes():
             LOG_CHANNEL_ID,
         )
     if AUDIT_CHANNEL_ID:
-        log.info("Command audit goes to channel %s (not the log channel).", AUDIT_CHANNEL_ID)
+        log.debug("Command audit goes to channel %s (not the log channel).", AUDIT_CHANNEL_ID)
     elif LOG_CHANNEL_ID:
-        log.info("MC_AUDIT_CHANNEL_ID is unset, so command audit stays in the log channel.")
+        log.debug("MC_AUDIT_CHANNEL_ID is unset, so command audit stays in the log channel.")
     if not RCON_PASSWORD:
         log.warning(
             "RCON password not configured. RCON features, idle shutdown and "
@@ -894,7 +894,7 @@ def log_startup_notes():
             "bot is in. Set it to your server's ID. DMs are refused either way."
         )
     if ADMIN_ROLE_ID:
-        log.info(
+        log.debug(
             "/backup list, /backup restore, console, serveredit and botstop need "
             "role %s. Every other command is open to this server.",
             ADMIN_ROLE_ID,
@@ -1107,7 +1107,7 @@ def release_stop_expectation_unless_shutting_down():
         clear_controlled_stop()
         return
     if shutdown_after_stop():
-        log.info(
+        log.debug(
             "Stop timed out, but Stopping server was logged after the command. "
             "PID %s is still an expected stop until %ss.",
             expected_stop.pid,
@@ -1176,7 +1176,7 @@ async def deny(interaction, text):
             describe_user(interaction.user),
         )
     else:
-        cmd_log.info(
+        cmd_log.debug(
             "%s by %s answered: %s",
             command_label(interaction),
             describe_user(interaction.user),
@@ -1283,7 +1283,7 @@ class Status:
         self.message = posted
         self.anchored = True
         self.last = time.monotonic()
-        log.info("Status moved to a channel message before the interaction token expired")
+        log.debug("Status moved to a channel message before the interaction token expired")
         return True
 
     async def set(self, text, force=False):
@@ -1299,7 +1299,7 @@ class Status:
             return False
 
         if force:
-            log.info("Status: %s", one_line(text))
+            log.debug("Status: %s", one_line(text))
 
         now = time.monotonic()
         if not force and now - self.last < self.min_gap:
@@ -1445,7 +1445,7 @@ class MinecraftLogTail:
             if not self.primed:
                 self.primed = True
                 if self._open(from_start=False):
-                    relay_log.info("Following the Minecraft log %s", self.path)
+                    relay_log.debug("Following the Minecraft log %s", self.path)
                 else:
                     relay_log.warning(
                         "Minecraft log %s doesn't exist yet. It will be followed "
@@ -1641,7 +1641,7 @@ class LogRelay:
             self.tail_task = spawn(self._tail_loop())
 
         self.flush_task = spawn(self._flush_loop())
-        relay_log.info(
+        relay_log.debug(
             "Log relay on: channel %s, bot lines=%s (from %s), Minecraft lines=%s",
             LOG_CHANNEL_ID,
             LOG_BOT,
@@ -1827,7 +1827,7 @@ class AuditRelay:
         self.handler.emit = lambda record: self.add_threadsafe(record.getMessage())
         cmd_log.addHandler(self.handler)
         self.flush_task = spawn(self._flush_loop())
-        log.info("Audit relay on: channel %s", AUDIT_CHANNEL_ID)
+        log.debug("Audit relay on: channel %s", AUDIT_CHANNEL_ID)
 
     async def _flush_loop(self):
         """Internal: flush loop."""
@@ -2202,7 +2202,7 @@ async def startup_rcon_check():
         return
     try:
         if not await server_running():
-            log.info("RCON check skipped: the Minecraft server is offline.")
+            log.debug("RCON check skipped: the Minecraft server is offline.")
             return
         ok, detail = await rcon_diagnose()
     except Exception as error:
@@ -2221,7 +2221,7 @@ async def startup_rcon_check():
         return
 
     if ok:
-        log.info("RCON check passed (%s:%s): %s", RCON_HOST, RCON_PORT, detail)
+        log.debug("RCON check passed (%s:%s): %s", RCON_HOST, RCON_PORT, detail)
         return
     log.warning(
         "RCON check FAILED (%s:%s): %s. The bot falls back to tmux for "
@@ -2308,14 +2308,14 @@ def command_is_idempotent(command):
 async def save_world():
     """Flush the world to disk. Paper's plain save-all is async."""
 
-    log.info("Saving the world")
+    log.debug("Saving the world")
     use_rcon = bool(RCON_PASSWORD)
     if use_rcon:
         try:
             output = await rcon.command("save-all flush", timeout=SAVE_TIMEOUT)
             lowered = strip_colors(output).lower()
             if "unknown" not in lowered and "incorrect" not in lowered:
-                log.info("World saved over RCON: %s", one_line(strip_colors(output)))
+                log.debug("World saved over RCON: %s", one_line(strip_colors(output)))
                 return True
             log.warning("save-all flush unsupported (%s)", output)
         except RCON_ERRORS as error:
@@ -2338,7 +2338,7 @@ async def save_world():
         log.error("Couldn't save the world: RCON and tmux both failed")
         return False
     await asyncio.sleep(SAVE_WAIT)
-    log.info("World saved (save-all sent, waited %ss)", SAVE_WAIT)
+    log.debug("World saved (save-all sent, waited %ss)", SAVE_WAIT)
     return True
 
 
@@ -2939,7 +2939,7 @@ async def launch_server():
         # The child inherited the fd; closing the parent copy is correct.
         logfile.close()
 
-    log.info("Start script running (pid %s)", proc.pid)
+    log.debug("Start script running (pid %s)", proc.pid)
     spawn(proc.wait())  # reap it, and keep the transport referenced
     return SimpleNamespace(proc=proc, log_offset=log_offset)
 
@@ -2977,7 +2977,7 @@ def clean_stale_world_folders():
         if is_stale_world_name(name) and os.path.isdir(path):
             shutil.rmtree(path, ignore_errors=True)
             removed.append(name)
-            log.info("Removed stale world folder %s", name)
+            log.debug("Removed stale world folder %s", name)
     return removed
 
 
@@ -3001,7 +3001,7 @@ def remove_legacy_dimension_folders():
             if os.path.isdir(path):
                 shutil.rmtree(path, ignore_errors=True)
                 removed.append(name)
-                log.info("Removed legacy dimension folder %s", name)
+                log.debug("Removed legacy dimension folder %s", name)
     return removed
 
 
@@ -3485,7 +3485,7 @@ async def ensure_idle_message(now):
 
 async def cancel_idle_shutdown(reason="A player joined."):
     """Cancel a pending idle shutdown."""
-    log.info("Idle shutdown cancelled: %s", reason)
+    log.debug("Idle shutdown cancelled: %s", reason)
     warning = idle.status
     idle.reset()
     if warning is not None:
@@ -3540,7 +3540,7 @@ async def run_idle_shutdown():
         if not await ensure_idle_message(now):
             return
 
-        log.info("Idle countdown finished: saving the world and stopping the server")
+        log.debug("Idle countdown finished: saving the world and stopping the server")
         msg = idle.status
         await msg.set(
             "[-] **Idle timer reached 0.**\n"
@@ -3621,7 +3621,7 @@ async def idle_tick():
 
     if idle.since is None:
         idle.since = now
-        log.info("Server is empty, idle countdown started (%s seconds)", IDLE_TIMEOUT)
+        log.debug("Server is empty, idle countdown started (%s seconds)", IDLE_TIMEOUT)
         await ensure_idle_message(now)
         return
 
@@ -3725,7 +3725,7 @@ async def send_alert(text=None, allow_mentions=False, embed=None):
     """Post a message or embed to the alert channel."""
     content = clip_discord(calm(text)) if text else None
     summary = content or (embed.title if embed is not None else "")
-    log.info("Alert: %s", one_line(summary))
+    log.debug("Alert: %s", one_line(summary))
     capture_log("alerts", one_line(summary))
 
     if not ALERT_CHANNEL_ID:
@@ -3790,7 +3790,7 @@ async def say_bot(text, color=None):
 async def auto_restart():
     """Restart the server after an unexpected stop, within limits."""
     if AUTO_RESTART_MAX <= 0:
-        log.info("Auto-restart is off (MC_AUTO_RESTART_MAX=0).")
+        log.debug("Auto-restart is off (MC_AUTO_RESTART_MAX=0).")
         return
 
     now = time.monotonic()
@@ -3895,7 +3895,7 @@ async def handle_unexpected_stop(dead_pid=None, force_crash=False):
     # A slow finish of our own /stop is not "someone else stopped it".
     # Only a shutdown line after that command counts, not an older one in the tail.
     if our_stop_explains(dead_pid, force_crash):
-        log.info(
+        log.debug(
             "Server finished a stop this bot requested %ss ago (pid %s). Not alerting.",
             int(time.monotonic() - recent_stop.at),
             dead_pid,
@@ -4176,7 +4176,7 @@ async def health_probe(state):
             result.tps = float(number.group())
     elif command == "tps" and "unknown" in clean.lower():
         state.tps_supported = False  # vanilla has no /tps; use `list` from now on
-        log.info("The server has no tps command. Health checks skip TPS.")
+        log.debug("The server has no tps command. Health checks skip TPS.")
     return result
 
 
@@ -4427,7 +4427,7 @@ async def announce_online():
     """Post that the bot has come online."""
     channel_id = ALERT_CHANNEL_ID or LOG_CHANNEL_ID
     if not channel_id:
-        log.info("No alert or log channel, so the online message was not posted.")
+        log.debug("No alert or log channel, so the online message was not posted.")
         return
     try:
         channel = bot.get_channel(channel_id)
@@ -4442,7 +4442,7 @@ async def announce_online():
 async def on_app_command_completion(interaction, command):
     """Audit successful slash commands."""
     elapsed = (discord.utils.utcnow() - interaction.created_at).total_seconds()
-    cmd_log.info("/%s finished in %.1fs", command.qualified_name, elapsed)
+    cmd_log.debug("/%s finished in %.1fs", command.qualified_name, elapsed)
 
 
 @bot.tree.error
@@ -4705,7 +4705,7 @@ class ConfirmView(discord.ui.View):
         self.done = True
         self.stop()
         open_confirms.discard(self)
-        cmd_log.info("/%s confirmed by %s", self.op, describe_user(interaction.user))
+        cmd_log.debug("/%s confirmed by %s", self.op, describe_user(interaction.user))
         if self.op in ("stop", "restart") and _stress_running:
             await interaction.response.edit_message(
                 content="Cannot shut off server during a test.", view=None
@@ -4736,7 +4736,7 @@ class ConfirmView(discord.ui.View):
         self.done = True
         self.stop()
         open_confirms.discard(self)
-        cmd_log.info("/%s cancelled by %s", self.op, describe_user(interaction.user))
+        cmd_log.debug("/%s cancelled by %s", self.op, describe_user(interaction.user))
         await interaction.response.edit_message(
             content=f"Cancelled. `/{self.op}` was not run.", view=None
         )
@@ -4934,7 +4934,7 @@ def note_backup_success():
     _backup_state["last_backup"] = time.time()
     _backup_state["warned"] = False
     _backup_state["last_fail"] = 0.0
-    log.info("Backup counters reset")
+    log.debug("Backup counters reset")
 
 
 def backup_status_line():
@@ -5212,7 +5212,7 @@ async def auto_backup_if_due():
                 log.warning("Auto-backup skipped: more than one server process")
                 return
             if running:
-                log.info("Auto-backup skipped: the server is online")
+                log.debug("Auto-backup skipped: the server is online")
                 return
             await send_alert(
                 "**Automatic backup starting.** The server is offline and has "
@@ -5395,7 +5395,7 @@ async def recover_interrupted_backup():
         )
         return
     if await restore_autosave():
-        log.info("Autosave restored after an interrupted backup")
+        log.debug("Autosave restored after an interrupted backup")
         return
     await send_alert(
         "[!] **Autosave may still be disabled.** The bot stopped during a "
@@ -5535,7 +5535,7 @@ async def chat_backup_from(player):
     """Manual backup requested by a Minecraft chat message."""
 
     global _chat_backup_last
-    log.info("Chat !backup from %s", player)
+    log.debug("Chat !backup from %s", player)
     if _stress_running:
         await say_game("backup is blocked during a stress test")
         return
@@ -5778,7 +5778,7 @@ async def handle_wake(reader, writer):
         now = time.monotonic()
         if now - _status_summary_at >= WAKE_LOG_EVERY:
             if _status_pings:
-                log.info("Wake: %s status pings in the last minute", _status_pings)
+                log.debug("Wake: %s status pings in the last minute", _status_pings)
             _status_pings = 0
             _status_summary_at = now
         try:
@@ -5801,7 +5801,7 @@ async def handle_wake(reader, writer):
     if report:
         _wake_logged[who] = now
         # why: raw IPs go to the audit channel, not the public alert channel
-        cmd_log.info("Wake: ping by %s host %s, server is starting", who, host)
+        cmd_log.debug("Wake: ping by %s host %s, server is starting", who, host)
         if len(_wake_logged) > 200:
             cutoff = now - WAKE_LOG_EVERY
             for ip in [ip for ip, at in _wake_logged.items() if at < cutoff]:
@@ -5946,7 +5946,7 @@ async def wake_start(who, host="?", report=True):
     elapsed = time.monotonic() - started
     if result in ("started", "already running"):
         if report:
-            cmd_log.info("Wake: %s host %s server ready after %.0fs (%s)", who, host, elapsed, result)
+            cmd_log.debug("Wake: %s host %s server ready after %.0fs (%s)", who, host, elapsed, result)
         return True
     if result == "busy":
         deadline = time.monotonic() + START_TIMEOUT
@@ -5955,7 +5955,7 @@ async def wake_start(who, host="?", report=True):
                 data = _read_tail(LOG_PATH, 64 * 1024) or b""
                 if b"Done (" in data:
                     if report:
-                        cmd_log.info(
+                        cmd_log.debug(
                             "Wake: %s host %s server ready after %.0fs (waited)",
                             who, host, time.monotonic() - started,
                         )
@@ -5964,7 +5964,7 @@ async def wake_start(who, host="?", report=True):
                 break
             await asyncio.sleep(POLL_INTERVAL)
     if report:
-        cmd_log.info("Wake: %s host %s server did not start (%s)", who, host, result)
+        cmd_log.debug("Wake: %s host %s server did not start (%s)", who, host, result)
     return False
 
 
@@ -5984,7 +5984,7 @@ async def wake_on_ping_loop():
                 _wake_server = await asyncio.start_server(
                     handle_wake, "0.0.0.0", port, reuse_address=True
                 )
-                log.info("Listening for a Minecraft join on 0.0.0.0:%s (held until the server is up)", port)
+                log.debug("Listening for a Minecraft join on 0.0.0.0:%s (held until the server is up)", port)
             await asyncio.sleep(2)
         except asyncio.CancelledError:
             await close_wake_listener()
@@ -6020,7 +6020,7 @@ def enable_chat_bridge():
     if not CHAT_CHANNEL_ID:
         return
     _chat_bridge = True
-    log.info("Chat bridge on (channel %s)", CHAT_CHANNEL_ID)
+    log.debug("Chat bridge on (channel %s)", CHAT_CHANNEL_ID)
 
 
 def disable_chat_bridge():
@@ -6028,7 +6028,7 @@ def disable_chat_bridge():
 
     global _chat_bridge
     if _chat_bridge:
-        log.info("Chat bridge off")
+        log.debug("Chat bridge off")
     _chat_bridge = False
 
 
@@ -6225,7 +6225,7 @@ async def prune_backups():
         log.exception("Backup retention failed")
         return
     for name in removed:
-        log.info("Deleted old backup %s (keeping %s per kind)", name, BACKUP_KEEP)
+        log.debug("Deleted old backup %s (keeping %s per kind)", name, BACKUP_KEEP)
 
 
 def recent_backups(limit=5, complete_only=True):
@@ -6325,7 +6325,7 @@ def restore_backup_folder(folder):
             path = os.path.join(root, name)
             if is_stale_world_name(name) and os.path.isdir(path):
                 shutil.rmtree(path, ignore_errors=True)
-                log.info("Removed leftover world folder %s", name)
+                log.debug("Removed leftover world folder %s", name)
         remove_legacy_dimension_folders()
     except Exception:
         log.exception("Post-restore cleanup failed (worlds were still restored)")
@@ -7744,7 +7744,7 @@ class PanelStatus:
                 view=self.view,
             )
         except EDIT_ERRORS:
-            log.info("stress: %s", text)
+            log.debug("stress: %s", text)
 
 
 async def stress_stop_server(status):
@@ -7864,7 +7864,7 @@ async def stress_restore_world(status, folder):
         await status.set(f"Restore failed: {error}")
         await stress_start_server(status)
         return False
-    log.info("Stress restore replaced: %s", ", ".join(copied))
+    log.debug("Stress restore replaced: %s", ", ".join(copied))
     return await stress_start_server(status)
 
 
@@ -8726,14 +8726,14 @@ async def test_one(target, extra):
             f"posted to {ALERT_CHANNEL_ID}" if ALERT_CHANNEL_ID else "MC_ALERT_CHANNEL_ID is unset"
         )
     if target == "audit":
-        cmd_log.info("test audit %s", extra or "manual")
+        cmd_log.debug("test audit %s", extra or "manual")
         if audit.started:
             await audit.flush()
         return ("pass" if AUDIT_CHANNEL_ID else "fail"), (
             f"posted to {AUDIT_CHANNEL_ID}" if AUDIT_CHANNEL_ID else "MC_AUDIT_CHANNEL_ID is unset"
         )
     if target == "log":
-        log.info("test log %s", extra or "manual")
+        log.debug("test log %s", extra or "manual")
         if relay.started:
             await relay.flush()
         return ("pass" if LOG_CHANNEL_ID else "fail"), (
@@ -9394,7 +9394,7 @@ async def rcontest(interaction: discord.Interaction):
     lines.append(f"Server process: {'running' if running else '**not running**'}")
 
     ok, detail = await rcon_diagnose()
-    log.info("/rcontest result: ok=%s detail=%s", ok, detail)
+    log.debug("/rcontest result: ok=%s detail=%s", ok, detail)
     if ok:
         lines.append(f"[+] **Works.** Server answered `list`: {detail}")
     else:
@@ -9459,7 +9459,7 @@ class BotStopView(discord.ui.View):
         """Cancel."""
         if not await gate(interaction, admin=True):
             return
-        cmd_log.info("/botstop cancelled by %s", describe_user(interaction.user))
+        cmd_log.debug("/botstop cancelled by %s", describe_user(interaction.user))
         self.stop()
         await interaction.response.edit_message(
             content="Cancelled. The bot keeps running.", view=None
@@ -9725,7 +9725,7 @@ async def console_execute(user, command):
     if not running:
         return "The server is offline. Use /start first."
 
-    cmd_log.info("Console command by %s: %s", describe_user(user), one_line(command))
+    cmd_log.debug("Console command by %s: %s", describe_user(user), one_line(command))
     ok, output = await send_console(command, timeout=10)
     if not ok:
         cmd_log.error("Console command failed to send: %s", one_line(command))
@@ -9734,7 +9734,7 @@ async def console_execute(user, command):
         return "Sent through tmux. It returns no reply, look at the console above."
 
     clean = strip_colors(output).strip()
-    cmd_log.info("Console reply: %s", one_line(clean) or "(no output)")
+    cmd_log.debug("Console reply: %s", one_line(clean) or "(no output)")
     return clean or "(done, no output)"
 
 
@@ -9819,7 +9819,7 @@ class ConsoleSession:
     async def run(self):
         """Run."""
         console_sessions.add(self)
-        log.info("Console opened by %s", describe_user(self.user))
+        log.debug("Console opened by %s", describe_user(self.user))
         try:
             while not self.stop.is_set():
                 await self.render()
@@ -9836,7 +9836,7 @@ class ConsoleSession:
                 self.wake.clear()
         finally:
             console_sessions.discard(self)
-            log.info(
+            log.debug(
                 "Console closed for %s (%s)", describe_user(self.user), self.end_reason
             )
             try:
@@ -10269,7 +10269,7 @@ def props_edit(key_input, value_input):
 def log_props_note():
     """Log props note."""
     if os.path.isfile(PROPS_PATH):
-        log.info("/serveredit edits %s", PROPS_PATH)
+        log.debug("/serveredit edits %s", PROPS_PATH)
     else:
         log.warning(
             "server.properties not found at %s. /serveredit won't work until "
@@ -10373,7 +10373,7 @@ async def serveredit_apply(interaction, setting, value):
         await followup_text(interaction, _props_missing_text(error), ephemeral=False)
         return
 
-    log.info("serveredit by %s: %s", describe_user(interaction.user), result.log)
+    log.debug("serveredit by %s: %s", describe_user(interaction.user), result.log)
     await followup_text(interaction, result.message, ephemeral=False)
 
 
@@ -10685,7 +10685,7 @@ async def run_bot_forever():
                 continue
             try:
                 await bot.start(TOKEN)
-                log.info("Bot stopped cleanly.")
+                log.debug("Bot stopped cleanly.")
                 return
             except (KeyboardInterrupt, asyncio.CancelledError):
                 return
@@ -10827,7 +10827,7 @@ def main():
     try:
         asyncio.run(run_bot_forever())
     except KeyboardInterrupt:
-        log.info("Interrupted, shutting down")
+        log.debug("Interrupted, shutting down")
 
 
 if __name__ == "__main__":
