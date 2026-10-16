@@ -5937,8 +5937,8 @@ async def chat_start(player):
 @bot.event
 async def on_message(message):
     """Handle Discord messages (chat relay and in-game !commands)."""
-    if message.author.bot or message.guild is None:
-        return  # why: a webhook can otherwise post !start and launch the server
+    if (message.author.bot and message.webhook_id is None) or message.guild is None:
+        return
     if GUILD_ID and message.guild.id != GUILD_ID:
         return
     if (message.content or "").strip().lower() != "!start":
