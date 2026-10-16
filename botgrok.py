@@ -6157,6 +6157,10 @@ async def chat_backup_loop():
                 if kind != "line":
                     continue
                 player, message = chat_player_message(line)
+                if not message:
+                    if _stress_running and line and "joined the game" in line:
+                        spawn(stress_warn())
+                    continue
                 first = (message.split() or [""])[0].lower()
                 if player and is_backup_chat(message):
                     spawn(chat_backup_from(player))
