@@ -9534,6 +9534,26 @@ class BotStopView(discord.ui.View):
                 pass
 
 
+def reexec_bot():
+    """Replace this process with a fresh copy. The PID stays, so systemd does not
+    tear the service down and kill Minecraft with it."""
+
+    os.chdir(BASE_DIR)
+    keep = {0, 1, 2}
+    try:
+        open_fds = [int(name) for name in os.listdir("/proc/self/fd")]
+    except OSError:
+        open_fds = []
+    for fd in open_fds:
+        if fd in keep:
+            continue
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    os.execv(sys.executable, [sys.executable, *sys.argv])
+
+
 async def _reset_bot_soon():
     """Internal: reset bot soon."""
     await asyncio.sleep(1)
@@ -9543,14 +9563,12 @@ async def _reset_bot_soon():
     except AmbiguousServer:
         pid = None
     if pid:
-        detach_server_tree(pid)  # why: systemd would otherwise kill it with the bot
+        detach_server_tree(pid)
     try:
         await asyncio.wait_for(shutdown_cleanup(), timeout=5)
     except Exception as error:
         log.warning("Cleanup before reset failed: %s", error)
-    # Do not close() first. That ends the process with code 0, and
-    # Restart=on-failure will not start it again.
-    os._exit(1)
+    reexec_bot()
 
 
 class BotResetView(discord.ui.View):
@@ -10873,7 +10891,7 @@ def update_from_github():
         )
         return
     update_log(f"Download verified ({now.stdout.strip()[:8]}). Restarting onto the new code.")
-    os._exit(1)
+    reexec_bot()
 
 
 def main():
