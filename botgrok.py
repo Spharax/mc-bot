@@ -2918,14 +2918,8 @@ async def launch_server():
     except OSError:
         log_offset = 0
 
-    # why: a transient service is outside this unit, so /botreset does not kill it
-    argv = [START_SCRIPT]
-    if shutil.which("systemd-run"):
-        argv = [
-            "systemd-run", "--collect", "--unit", f"mc-server-{int(time.time())}",
-            "--description", "Minecraft server",
-            START_SCRIPT,
-        ]
+    # Direct script. systemd-run needs privileges this user does not have,
+    # and a refused transient unit made every /start fail.
     log.info("Launching the start script %s (output: %s)", START_SCRIPT, START_LOG)
     rotate_capped(START_LOG, START_LOG_MAX_BYTES, LOG_KEEP_HIGH)
     logfile = open(START_LOG, "ab")
@@ -2935,7 +2929,7 @@ async def launch_server():
         )
         logfile.flush()
         proc = await asyncio.create_subprocess_exec(
-            *argv,
+            START_SCRIPT,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=logfile,
             stderr=logfile,
