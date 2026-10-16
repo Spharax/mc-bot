@@ -1588,6 +1588,8 @@ class LogRelay:
                 self.stop_marked = False
             else:
                 self.stop_marked = False
+                if "Thread RCON Client" in text or "RCON Listener" in text:
+                    continue  # why: every bot connect/disconnect otherwise spams the log channel
                 self.add("Minecraft", text)
 
     def server_up(self, first):
@@ -2045,7 +2047,7 @@ class Rcon:
             writer.close()
             raise
         self._reader, self._writer = reader, writer
-        log.info("RCON connected to %s:%s", RCON_HOST, RCON_PORT)
+        log.debug("RCON connected to %s:%s", RCON_HOST, RCON_PORT)
 
     async def _exchange(self, command, timeout, trace):
         """Internal: exchange."""
@@ -3293,13 +3295,16 @@ async def get_player_info():
 
     if not RCON_PASSWORD:
         return None
+    if not await server_running():
+        return None  # why: the server is off, so a refused RCON is not a warning
 
     try:
         output = await rcon.command("list")
     except RCON_ERRORS as error:
-        warn_throttled(
-            "players", "RCON player check failed: %s", describe_rcon_error(error)
-        )
+        if not isinstance(error, ConnectionRefusedError):
+            warn_throttled(
+                "players", "RCON player check failed: %s", describe_rcon_error(error)
+            )
         return None
 
     clean = strip_colors(output)
@@ -3601,7 +3606,7 @@ MSPT_RE = re.compile(r"MSPT from last ([^:\n]+):\s*([^\n]+)")
 async def _metric(command, pattern, timeout=6.0):
     """Read a Paper TPS or MSPT line over RCON, then the tmux console."""
 
-    if RCON_PASSWORD:
+    if RCON_PASSWORD and await server_running():
         try:
             output = await rcon.command(command)
             found = pattern.findall(strip_colors(output))
@@ -3609,7 +3614,8 @@ async def _metric(command, pattern, timeout=6.0):
                 labels, values = found[-1]
                 return labels.strip(), values.strip()
         except RCON_ERRORS as error:
-            log.warning("RCON %s failed: %s", command, describe_rcon_error(error))
+            if not isinstance(error, ConnectionRefusedError):
+                log.warning("RCON %s failed: %s", command, describe_rcon_error(error))
 
     if tps_lock is None:
         return None
@@ -4082,6 +4088,8 @@ async def health_probe(state):
     if not RCON_PASSWORD:
         return result
 
+    if not await server_running():
+        return result  # why: offline is not an RCON failure
     command = "tps" if state.tps_supported else "list"
     try:
         output = await rcon.command(command, timeout=HEALTH_PROBE_TIMEOUT)
@@ -4090,9 +4098,10 @@ async def health_probe(state):
         return result
     except RCON_ERRORS as error:
         # Refused, busy, login problems: not evidence the server is stuck.
-        warn_throttled(
-            "health-rcon", "Health check can't use RCON: %s", describe_rcon_error(error)
-        )
+        if not isinstance(error, ConnectionRefusedError):
+            warn_throttled(
+                "health-rcon", "Health check can't use RCON: %s", describe_rcon_error(error)
+            )
         return result
 
     result.responded = True
