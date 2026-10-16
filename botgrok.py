@@ -103,7 +103,8 @@ Commands are refused in DMs. When DISCORD_GUILD_ID is set, other servers are
 refused too. Every command is open to members of that server except /backup
 list, /backup restore, /console, /serveredit, /logdelete and /botstop, which
 need MC_ADMIN_ROLE_ID (or the Administrator permission when it is unset). Stop
-and restart ask for confirmation first. /ping only accepts a public IP. In
+and restart ask for confirmation first. /ping, /pingall and !pingall ICMP-ping
+each online player's login address, public or private. In
 game, any player can type !backup (one per MC_CHAT_BACKUP_COOLDOWN), !start,
 !pingall, !tps and !chatclear while MC_CHAT_BACKUP is on.
 Permission and busy checks run before the first await and every long command
@@ -8900,7 +8901,7 @@ def looks_like_player(target):
 
 
 def player_login_address(name):
-    """Most recent public login address for this player, from latest.log."""
+    """Most recent login address for this player, from latest.log. Any IP."""
 
     data = _read_tail(LOG_PATH, 8 * 1024 * 1024)
     if not data:
@@ -8917,10 +8918,10 @@ def player_login_address(name):
     return found
 
 
-@bot.tree.command(name="ping", description="Ping a public IP or an online player")
-@app_commands.describe(target="Public IP, or a player name such as player123")
+@bot.tree.command(name="ping", description="Ping an IP or an online player's address")
+@app_commands.describe(target="An IP, or a player name such as player123")
 async def ping(interaction: discord.Interaction, target: str):
-    """Slash command: ping the server or a player."""
+    """Slash command: ICMP-ping an IP or a player's login address."""
     if not await gate(interaction):
         return
 
@@ -8930,25 +8931,14 @@ async def ping(interaction: discord.Interaction, target: str):
         address = ipaddress.ip_address(target)
     except ValueError:
         if not looks_like_player(target):
-            await deny(
-                interaction,
-                "[!] Give a public IP, or a player name like `player123`.",
-            )
+            await deny(interaction, "[!] Give an IP, or a player name like `player123`.")
             return
         await interaction.response.defer()
-        ping = await spark_player_ping(target)
-        if ping is None:
-            await followup_text(interaction, f"[-] No Spark ping for `{target}`. Are they online?")
-        else:
-            await followup_text(interaction, f"[+] `{target}`: **{ping} ms** (Spark)")
-        return
-
-    if not address_is_public(address):
-        await deny(
-            interaction,
-            "[!] That address is not a public IP. Refusing to probe it from the host.",
-        )
-        return
+        address = await asyncio.to_thread(player_login_address, target)
+        if address is None:
+            await followup_text(interaction, f"[-] No login address for `{target}` in the log.")
+            return
+        label = f"{target} ({address})"
 
     await interaction.response.defer()
     result = await icmp_ping(address)
@@ -9029,15 +9019,24 @@ async def spark_player_ping(name):
 
 
 async def player_ping_lines():
-    """One line per online player, from Spark. No IPs."""
+    """ICMP-ping each online player's login address. Public or private."""
 
     names = await online_player_names()
     if names is None:
         return None
     lines = []
     for name in names:
-        ping = await spark_player_ping(name)
-        lines.append(f"{name}: {ping} ms" if ping is not None else f"{name}: no ping data")
+        address = await asyncio.to_thread(player_login_address, name)
+        if address is None:
+            lines.append(f"{name}: no login address")
+            continue
+        result = await icmp_ping(address, count=2, wait=1)
+        if result is None:
+            lines.append(f"{name} ({address}): ping missing")
+        elif result == "timeout" or result.get("avg") is None:
+            lines.append(f"{name} ({address}): no reply")
+        else:
+            lines.append(f"{name} ({address}): {result['avg']} ms")
     return lines
 
 
@@ -9059,7 +9058,7 @@ async def say_ping_lines(lines):
         await say_game(", ".join(chunk))
 
 
-@bot.tree.command(name="pingall", description="Ping every player who is online")
+@bot.tree.command(name="pingall", description="Ping every online player's address")
 async def pingall(interaction: discord.Interaction):
     """Slash command: ping all online players."""
     if not await gate(interaction):
@@ -9868,6 +9867,8 @@ class ConsoleSession:
 
     async def render(self, ended=None):
         """Render."""
+        if ended is None and self.stop.is_set():
+            ended = self.end_reason
         await self._refresh_running()
         sig = self._signature()
         if ended is None and not self.force and sig == self.sig:
@@ -9990,7 +9991,11 @@ class ConsoleView(discord.ui.View):
         """Close console."""
         self.session.end_reason = "Closed."
         self.session.close()
-        await interaction.response.defer()
+        try:
+            await interaction.response.edit_message(content="Console closed.", embed=None, view=None)
+        except EDIT_ERRORS:
+            if not interaction.response.is_done():
+                await interaction.response.defer()
 
 
 def claim_console_slot(interaction):
