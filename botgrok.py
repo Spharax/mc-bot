@@ -28,7 +28,10 @@ Environment (see .env next to this file):
   MC_IDLE_CHANNEL_ID       defaults to MC_ALERT_CHANNEL_ID
   MC_BACKUP_DIR            parent folder; each backup is a subfolder
   MC_BACKUP_SOURCE         comma-separated paths to copy (default: worlds)
-  MC_BACKUP_COMMAND        optional command after the copy; MC_BACKUP_DEST is set
+  MC_BACKUP_COMMAND        optional command after the copy. No shell: argv only.
+                           {dest} {kind} {number} are substituted as single args.
+  MC_BACKUP_ALLOW          comma-separated binaries allowed to run, default
+                           rclone,restic,rsync,borg,cp
   MC_BACKUP_TIMEOUT        seconds, default 600
   MC_BACKUP_KEEP           finished backups kept per kind (auto, manual), default 20;
                            older ones are deleted after a successful backup. 0 = keep all
@@ -142,6 +145,7 @@ import logging.handlers
 import os
 import re
 import shutil
+import shlex
 import signal
 import socket
 import subprocess
@@ -314,6 +318,11 @@ AUTO_RESTART = env_bool("MC_AUTO_RESTART", True)
 AUTO_RESTART_MAX = env_int("MC_AUTO_RESTART_MAX", 3, 0)
 AUTO_RESTART_WINDOW = env_int("MC_AUTO_RESTART_WINDOW", 1800, 1)
 BACKUP_COMMAND = os.getenv("MC_BACKUP_COMMAND", "").strip()
+BACKUP_ALLOW = {
+    name.strip()
+    for name in os.getenv("MC_BACKUP_ALLOW", "rclone,restic,rsync,borg,cp").split(",")
+    if name.strip()
+}
 CHAT_BACKUP = env_bool("MC_CHAT_BACKUP", True)
 WAKE_ON_PING = env_bool("MC_WAKE_ON_PING", True)
 START_CHANNEL_ID = env_int("MC_START_CHANNEL_ID", 1556021831218110564)
@@ -5093,7 +5102,11 @@ async def perform_backup(kind):
     env["MC_BACKUP_DEST"] = folder
     env["MC_BACKUP_KIND"] = kind
     env["MC_BACKUP_NUMBER"] = str(number)
-    code, tail = await run_shell(BACKUP_COMMAND, BACKUP_TIMEOUT, env=env)
+    try:
+        argv = backup_argv(BACKUP_COMMAND, folder, kind, str(number))
+    except ValueError as error:
+        return 1, str(error).encode(), folder
+    code, tail = await run_argv(argv, BACKUP_TIMEOUT, env=env)
     return code, tail or f"copied to {folder}".encode(), folder
 
 
@@ -5307,13 +5320,43 @@ async def kill_proc(proc, group=False):
         pass
 
 
-async def run_shell(command, timeout, env=None):
-    """Run a shell command. Returns (exit_code, output_tail); the code is None
-    on timeout. Only the last bytes of output are kept, so a chatty tool
-    can't grow memory."""
+def backup_argv(command, dest, kind, number):
+    """Turn MC_BACKUP_COMMAND into an argv list. No shell, allowlisted binary.
 
-    proc = await asyncio.create_subprocess_shell(
-        command,
+    {dest}, {kind} and {number} (and the $MC_BACKUP_* forms) are replaced as
+    whole arguments. Shell operators are rejected.
+    """
+
+    try:
+        parts = shlex.split(command)
+    except ValueError as error:
+        raise ValueError(f"bad MC_BACKUP_COMMAND: {error}") from error
+    if not parts:
+        raise ValueError("MC_BACKUP_COMMAND is empty")
+    repl = {
+        "$MC_BACKUP_DEST": dest, "${MC_BACKUP_DEST}": dest, "{dest}": dest,
+        "$MC_BACKUP_KIND": kind, "${MC_BACKUP_KIND}": kind, "{kind}": kind,
+        "$MC_BACKUP_NUMBER": number, "${MC_BACKUP_NUMBER}": number, "{number}": number,
+    }
+    argv = []
+    for part in parts:
+        if any(ch in part for ch in ";|&<>`()") or part in ("&&", "||"):
+            raise ValueError(f"shell syntax is not allowed: {part}")
+        argv.append(repl.get(part, part))
+    exe = os.path.basename(argv[0])
+    if exe not in BACKUP_ALLOW:
+        raise ValueError(f"{exe} is not in MC_BACKUP_ALLOW ({', '.join(sorted(BACKUP_ALLOW))})")
+    return argv
+
+
+async def run_argv(argv, timeout, env=None):
+    """Run an allowlisted argv. Returns (exit_code, output_tail); None on timeout.
+
+    Only the last bytes of output are kept, so a chatty tool can't grow memory.
+    """
+
+    proc = await asyncio.create_subprocess_exec(
+        *argv,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
         start_new_session=True,  # own process group, so a timeout kills rclone too
