@@ -316,7 +316,7 @@ CHAT_BACKUP = env_bool("MC_CHAT_BACKUP", True)
 WAKE_ON_PING = env_bool("MC_WAKE_ON_PING", True)
 START_CHANNEL_ID = env_int("MC_START_CHANNEL_ID", 1556021831218110564)
 CHAT_CHANNEL_ID = env_int("MC_CHAT_CHANNEL_ID", 0)
-_chat_bridge = False  # why: chat sync stays off until /start turns it on
+_chat_bridge = False  # on while the Minecraft server is up
 BACKUP_TIMEOUT = env_int("MC_BACKUP_TIMEOUT", 600, 1)
 # Finished backups kept per kind (auto / manual); older ones are deleted after a
 # successful backup. 0 keeps everything.
@@ -3982,6 +3982,7 @@ async def monitor_tick(state):
         )
         if running:
             relay.server_up(first=True)
+            enable_chat_bridge()
     elif replaced:
         log.warning(
             "Minecraft PID changed from %s to %s without an observed stop.",
@@ -3999,6 +4000,7 @@ async def monitor_tick(state):
         if running:
             log.info("Minecraft server process is up (pid %s)", pid)
             relay.server_up(first=False)
+            enable_chat_bridge()
         else:
             disable_chat_bridge()
         if not running and stop is not None and time.monotonic() - stop.at > EXPECTED_STOP_MAX:
@@ -4393,6 +4395,7 @@ COMMANDS = (
     "/backup list  list, delete, or keep backups\n"
     "/backup restore  restore a backup\n"
     "/say  send a line to Minecraft chat\n"
+    "/chatclear  clear the Minecraft chat channel\n"
     "/log  log one system for 20 minutes\n"
     "/log tps  longer TPS graph\n"
     "/stresstest  4-player load, network, health log\n"
@@ -5993,6 +5996,16 @@ async def wake_on_ping_loop():
             await asyncio.sleep(5)
 
 
+async def chat_clear_from(player):
+    """In-game !chatclear. Clears the Discord chat channel."""
+
+    count, error = await clear_chat_channel()
+    if error:
+        await say_game(f"couldn't clear discord chat: {error}")
+        return
+    await say_game(f"{player} cleared {count} discord chat message{'s' if count != 1 else ''}")
+
+
 async def chat_start(player):
     """In-game !start."""
 
@@ -6024,6 +6037,32 @@ def chat_bridge_note():
     if not CHAT_CHANNEL_ID:
         return ""
     return " Chat sync is on." if _chat_bridge else ""
+
+
+async def clear_chat_channel():
+    """Delete recent messages in the Minecraft chat channel. Returns (count, error)."""
+
+    if not CHAT_CHANNEL_ID:
+        return 0, "MC_CHAT_CHANNEL_ID is not set."
+    try:
+        channel = bot.get_channel(CHAT_CHANNEL_ID) or await bot.fetch_channel(CHAT_CHANNEL_ID)
+        deleted = await channel.purge(limit=500)
+    except EDIT_ERRORS as error:
+        return 0, str(error)
+    return len(deleted), None
+
+
+@bot.tree.command(name="chatclear", description="Clear the Minecraft chat channel")
+async def chatclear(interaction: discord.Interaction):
+    """Slash command: delete recent messages in the synced chat channel."""
+    if not await gate(interaction):
+        return
+    await interaction.response.defer()
+    count, error = await clear_chat_channel()
+    if error:
+        await followup_text(interaction, f"[!] **Couldn't clear the chat channel.**\n{error}")
+        return
+    await followup_text(interaction, f"[+] Cleared {count} message{'s' if count != 1 else ''}.")
 
 
 async def relay_mc_chat(player, message):
@@ -6126,6 +6165,8 @@ async def chat_backup_loop():
                     spawn(chat_tps())
                 elif player and first == "!start":
                     spawn(chat_start(player))
+                elif player and first == "!chatclear":
+                    spawn(chat_clear_from(player))
                 elif player and message and _chat_bridge:
                     spawn(relay_mc_chat(player, message))
                 if _stress_running and "joined the game" in line:
