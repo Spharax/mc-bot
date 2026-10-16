@@ -131,6 +131,8 @@ sudo systemctl enable --now mc-bot
 | `DISCORD_GUILD_ID` | Guild to sync commands to |
 | `MC_RCON_HOST` / `MC_RCON_PORT` / `MC_RCON_PASSWORD` | RCON connection |
 | `MC_ALERT_CHANNEL_ID` | Crash, health, and idle alerts |
+| `MC_CHAT_CHANNEL_ID` | Discord channel synced with in-game chat. Off until `/start`. |
+| `MC_JAR_NAME` | Jar names to detect, comma-separated. Default `paper.jar,purpur.jar`. |
 | `MC_LOG_CHANNEL_ID` | Minecraft log relay |
 | `MC_AUDIT_CHANNEL_ID` | Who ran which command |
 | `MC_BACKUP_DIR` | Where backups are stored |

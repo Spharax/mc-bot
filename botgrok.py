@@ -9,7 +9,9 @@ Environment (see .env next to this file):
   MC_START_SCRIPT          start script (default ~/start-mc.sh)
   MC_LOG_PATH              server log (default ~/minecraft/logs/latest.log)
   MC_START_LOG             start-script log (default ~/mc-bot-start.log)
-  MC_JAR_NAME              jar name used to find the process (default paper.jar)
+  MC_JAR_NAME              jar names, comma-separated (default paper.jar,purpur.jar)
+  MC_CHAT_CHANNEL_ID       Discord channel synced with in-game chat (0 = off);
+                           the bridge only turns on after /start
   MC_SERVER_DIR            optional: only count a JVM whose working directory is
                            this folder (use it if two Paper servers may run)
   MC_RCON_HOST             default 127.0.0.1
@@ -273,16 +275,24 @@ LOG_PATH = os.path.expanduser(
     os.getenv("MC_LOG_PATH", "~/minecraft/logs/latest.log")
 )
 START_LOG = os.path.expanduser(os.getenv("MC_START_LOG", "~/mc-bot-start.log"))
-JAR_NAME = os.getenv("MC_JAR_NAME", "paper.jar")
+JAR_NAMES = [
+    name.strip()
+    for name in os.getenv("MC_JAR_NAME", "paper.jar,purpur.jar").split(",")
+    if name.strip()
+] or ["paper.jar", "purpur.jar"]
+JAR_NAME = JAR_NAMES[0]
 # End-anchored, and the jar name must be its own path segment. mypaper.jar
-# and paper.jar.bak are not the server.
+# and paper.jar.bak are not the server. Paper and Purpur both match.
+_JAR_ALT = "|".join(re.escape(name) for name in JAR_NAMES)
 SERVER_PATTERN = (
-    r"^([^ ]*/)?java (?:.*[\s/\"'])?"
-    + re.escape(JAR_NAME)
-    + r"(?: |$)"
+    r"^([^ ]*/)?java (?:.*[\s/\"'])?(?:"
+    + _JAR_ALT
+    + r")(?: |$)"
 )
 # why: pgrep speaks POSIX ERE, which rejects (?: and treats \\s as a literal s
-PGREP_PATTERN = "java.*" + re.sub(r"([.^$*+?()[{\\|])", r"\\\1", JAR_NAME)
+PGREP_PATTERN = "java.*(" + "|".join(
+    re.sub(r"([.^$*+?()[{\\|])", r"\\\1", name) for name in JAR_NAMES
+) + ")"
 SERVER_DIR = env_path("MC_SERVER_DIR")
 STATE_DIR = env_path("MC_STATE_DIR", BASE_DIR)
 BOT_LOG_DIR = env_path("MC_BOT_LOG_DIR", os.path.join(STATE_DIR, "logs"))
@@ -305,6 +315,8 @@ BACKUP_COMMAND = os.getenv("MC_BACKUP_COMMAND", "").strip()
 CHAT_BACKUP = env_bool("MC_CHAT_BACKUP", True)
 WAKE_ON_PING = env_bool("MC_WAKE_ON_PING", True)
 START_CHANNEL_ID = env_int("MC_START_CHANNEL_ID", 1556021831218110564)
+CHAT_CHANNEL_ID = env_int("MC_CHAT_CHANNEL_ID", 0)
+_chat_bridge = False  # why: chat sync stays off until /start turns it on
 BACKUP_TIMEOUT = env_int("MC_BACKUP_TIMEOUT", 600, 1)
 # Finished backups kept per kind (auto / manual); older ones are deleted after a
 # successful backup. 0 keeps everything.
@@ -3006,8 +3018,10 @@ async def launch_or_report(msg):
     # tmux session still exists, which is exactly what a Paper 26 shutdown looks
     # like for up to a minute.
     if await server_running(force=True):
+        enable_chat_bridge()
         await msg.set(
-            "[+] **Server is already running.** Not launching a second process.",
+            "[+] **Server is already running.** Not launching a second process."
+            + chat_bridge_note(),
             force=True,
         )
         return None
@@ -3991,7 +4005,9 @@ async def monitor_tick(state):
         if running:
             log.info("Minecraft server process is up (pid %s)", pid)
             relay.server_up(first=False)
-        elif stop is not None and time.monotonic() - stop.at > EXPECTED_STOP_MAX:
+        else:
+            disable_chat_bridge()
+        if not running and stop is not None and time.monotonic() - stop.at > EXPECTED_STOP_MAX:
             log.warning(
                 "PID %s exited %ss after the stop request. The shutdown window expired, so this is a crash.",
                 stop.pid,
@@ -4000,24 +4016,24 @@ async def monitor_tick(state):
             clear_controlled_stop()
             stop = None
             expired = True
-        elif stop is not None and shutdown_after_stop(stop):
+        elif not running and stop is not None and shutdown_after_stop(stop):
             log.info("Minecraft server process ended after Stopping server (pid %s)", stop.pid)
-        elif stop is not None and _stop_log_replaced(stop):
+        elif not running and stop is not None and _stop_log_replaced(stop):
             log.warning(
                 "Stop was requested for pid %s, but latest.log rotated before Stopping server. "
                 "Not treating that as a crash.",
                 stop.pid,
             )
-        elif stop is not None:
+        elif not running and stop is not None:
             log.warning(
                 "Stop was requested for pid %s but Stopping server was not logged after the command. Treating it as a crash.",
                 stop.pid,
             )
             clear_controlled_stop()
             stop = None
-        elif self_managed:
+        elif not running and self_managed:
             log.info("Minecraft server process ended during /%s", current_op)
-        else:
+        elif not running:
             log.warning("Minecraft server process ended and this bot did not stop it")
         if not running:
             relay.server_stopped()
@@ -4288,7 +4304,8 @@ async def health_tick():
                 footer=f"Incident {state.incident} · opened {opened} · repeats every {HEALTH_COOLDOWN}s",
             )
         )
-        await say_bot("server health is low", color="red")
+        tps = f"{probe.tps:.1f}" if probe.tps is not None else "unavailable"
+        await say_bot(f"server health is low. TPS {tps}", color="red")
     elif state.alerting:
         players = None
         try:
@@ -4534,12 +4551,16 @@ async def start(interaction: discord.Interaction):
     if launch is None:
         return
 
-    await wait_for_ready(
+    ready = await wait_for_ready(
         msg, t0, cursor, launch,
         "[.] Starting Minecraft server",
         "[+] **Server is ready. Players can join.**",
         "[!] **Server didn't finish loading.**",
     )
+    if ready:
+        enable_chat_bridge()
+        if CHAT_CHANNEL_ID:
+            await msg.set("[+] **Server is ready. Players can join.**" + chat_bridge_note(), force=True)
 
 
 async def run_stop(interaction):
@@ -5592,7 +5613,8 @@ async def run_text_start(who, reply):
         deadline = time.monotonic() + START_TIMEOUT
         while time.monotonic() < deadline:
             if await server_running(force=True) and b"Done (" in _log_from(LOG_PATH, mark):
-                await reply("server is ready")
+                enable_chat_bridge()
+                await reply("server is ready" + chat_bridge_note())
                 return "started"
             await asyncio.sleep(POLL_INTERVAL)
         await reply("server did not finish starting")
@@ -5983,6 +6005,59 @@ async def chat_start(player):
     await run_text_start(player, say_game)
 
 
+def enable_chat_bridge():
+    """Turn the Discord/Minecraft chat sync on. /start is the only switch."""
+
+    global _chat_bridge
+    if not CHAT_CHANNEL_ID:
+        return
+    _chat_bridge = True
+    log.info("Chat bridge on (channel %s)", CHAT_CHANNEL_ID)
+
+
+def disable_chat_bridge():
+    """Turn the chat sync off. A stopped server has nothing to talk to."""
+
+    global _chat_bridge
+    if _chat_bridge:
+        log.info("Chat bridge off")
+    _chat_bridge = False
+
+
+def chat_bridge_note():
+    """Short note for a start reply."""
+
+    if not CHAT_CHANNEL_ID:
+        return ""
+    return " Chat sync is on." if _chat_bridge else ""
+
+
+async def relay_mc_chat(player, message):
+    """Post one Minecraft chat line to the mcchat channel as plain text."""
+
+    if not _chat_bridge or not CHAT_CHANNEL_ID:
+        return
+    if not player or not message or message.startswith("!"):
+        return
+    text = f"({player}): {message}"
+    try:
+        channel = bot.get_channel(CHAT_CHANNEL_ID) or await bot.fetch_channel(CHAT_CHANNEL_ID)
+        await channel.send(text[:1900])
+    except EDIT_ERRORS as error:
+        log.warning("Couldn't post Minecraft chat: %s", error)
+
+
+async def relay_discord_chat(name, message):
+    """Send one Discord line into Minecraft chat."""
+
+    body = clean_chat(f"<{name}> {message}", 200)
+    if not body:
+        return
+    ok, _output = await send_console(f"say {body}")
+    if not ok:
+        log.warning("Discord chat not delivered: %s", body)
+
+
 @bot.event
 async def on_message(message):
     """Handle Discord messages (chat relay and in-game !commands)."""
@@ -5990,7 +6065,17 @@ async def on_message(message):
         return
     if GUILD_ID and message.guild.id != GUILD_ID:
         return
-    if (message.content or "").strip().lower() != "!start":
+    content = (message.content or "").strip()
+    if (
+        _chat_bridge
+        and CHAT_CHANNEL_ID
+        and message.channel.id == CHAT_CHANNEL_ID
+        and content
+        and content.lower() != "!start"
+    ):
+        spawn(relay_discord_chat(message.author.display_name, content))
+        return
+    if content.lower() != "!start":
         return
     who = message.author.display_name
 
@@ -6047,6 +6132,8 @@ async def chat_backup_loop():
                     spawn(chat_tps())
                 elif player and first == "!start":
                     spawn(chat_start(player))
+                elif player and message and _chat_bridge:
+                    spawn(relay_mc_chat(player, message))
                 if _stress_running and "joined the game" in line:
                     spawn(stress_warn())
         except Exception:
