@@ -11,7 +11,7 @@ Environment (see .env next to this file):
   MC_START_LOG             start-script log (default ~/mc-bot-start.log)
   MC_JAR_NAME              jar names, comma-separated (default paper.jar,purpur.jar)
   MC_CHAT_CHANNEL_ID       Discord channel synced with in-game chat (0 = off);
-                           the bridge only turns on after /start
+                           on while the Minecraft server is up, off when it stops
   MC_SERVER_DIR            optional: only count a JVM whose working directory is
                            this folder (use it if two Paper servers may run)
   MC_RCON_HOST             default 127.0.0.1

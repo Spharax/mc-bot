@@ -1,6 +1,6 @@
 # mc-bot
 
-Discord bot that starts, stops, watches, backs up, and maps a Paper Minecraft server.
+Discord bot that starts, stops, watches, backs up, and maps a Paper or Purpur Minecraft server.
 
 ## What it does
 
@@ -8,7 +8,10 @@ Discord bot that starts, stops, watches, backs up, and maps a Paper Minecraft se
 - Idle shutdown when no one is online, with a countdown warning
 - Crash detection vs intentional stop, with optional auto-restart
 - Backups (manual and automatic) with list / restore / delete / keep
-- Restore safety net: live worlds are renamed to `*.before-restore` and kept
+- Restore: live worlds are renamed aside, then deleted after a successful restore (keep them with `MC_RESTORE_DELETE=false`)
+- Discord channel synced with in-game chat (`MC_CHAT_CHANNEL_ID`)
+- `/chatclear` and in-game `!chatclear` clear that channel
+- `/logdelete` wipes local log files
 - Live log relay and command audit to Discord channels
 - On-demand top-down map (`/map`)
 - Player stats, inventory, and health (`/stats`)
@@ -21,7 +24,7 @@ Discord bot that starts, stops, watches, backs up, and maps a Paper Minecraft se
 ## Requirements
 
 - Python 3.9+
-- A Paper (or compatible) Minecraft server
+- A Paper or Purpur Minecraft server (`paper.jar` and `purpur.jar` are both detected)
 - `tmux` (used for the console fallback)
 - A Discord bot token
 - Optional but recommended: RCON enabled on the Minecraft server (for player count, idle shutdown, TPS, and live console)
@@ -131,7 +134,10 @@ sudo systemctl enable --now mc-bot
 | `DISCORD_GUILD_ID` | Guild to sync commands to |
 | `MC_RCON_HOST` / `MC_RCON_PORT` / `MC_RCON_PASSWORD` | RCON connection |
 | `MC_ALERT_CHANNEL_ID` | Crash, health, and idle alerts |
-| `MC_CHAT_CHANNEL_ID` | Discord channel synced with in-game chat. Off until `/start`. |
+| `MC_CHAT_CHANNEL_ID` | Discord channel synced with in-game chat. On while the server is up. |
+| `MC_BACKUP_COMMAND` | Optional program run after a backup. Not a shell. `{dest}` is the new folder. |
+| `MC_BACKUP_ALLOW` | Binaries that command may run. Default `rclone,restic,rsync,borg,cp`. |
+| `MC_RESTORE_DELETE` | Delete the old worlds after a successful restore. Default true. |
 | `MC_JAR_NAME` | Jar names to detect, comma-separated. Default `paper.jar,purpur.jar`. |
 | `MC_LOG_CHANNEL_ID` | Minecraft log relay |
 | `MC_AUDIT_CHANNEL_ID` | Who ran which command |
@@ -143,13 +149,31 @@ sudo systemctl enable --now mc-bot
 
 See the module docstring at the top of `botgrok.py` for the full list and defaults.
 
-## Restore safety
+## Chat sync
 
-`/backup restore` renames the current worlds to `*.before-restore` (or a timestamped name) before copying the backup in. Those copies are **not** deleted on success and are **not** removed by the pre-start cleanup, so a bad restore can be undone by hand. Only known world folders ending in `.old` or `.old-layout` are cleaned up automatically.
+Set `MC_CHAT_CHANNEL_ID` to a channel id. While the Minecraft server is up, player chat is posted there as `(Steve): hello`, and anything typed in that channel is said in-game as `<YourName> hello`. It turns off when the server stops. `/chatclear` in Discord and `!chatclear` in Minecraft delete the last 500 messages. The bot needs Manage Messages in that channel.
+
+## Backups
+
+`/backup` copies the worlds into `MC_BACKUP_DIR` and writes `backup.txt`. That local copy is unchanged.
+
+`MC_BACKUP_COMMAND` is optional and off when unset. It is not a shell. The program must be in `MC_BACKUP_ALLOW`, shell operators are rejected, and `{dest}` is the new backup folder as one argument. Example: `rclone copy {dest} remote:mc`. A rejected or failing command fails the backup and is reported. It cannot run `bash`, `python`, or `rm`.
+
+## Restore
+
+`/backup restore` renames the current worlds to `*.before-restore` before copying the backup in. On success those copies are deleted, unless `MC_RESTORE_DELETE=false` (or `RESTOREDELETE=false`). A failed restore still puts the old worlds back before anything is deleted. Plugins and config are not touched. Only known world folders ending in `.old` or `.old-layout` are cleaned up on start.
+
+## Logs
+
+Routine success lines are debug and do not go to the Discord log channel. Warnings and errors still do. `/logdelete` (admin, with a confirm button) deletes bot logs, the start log, the manual log, Minecraft log archives, and crash reports. Live logs are emptied, not unlinked.
+
+## `/botreset`
+
+`/botreset` restarts the bot and leaves the Minecraft server running. It tries to move the server out of the bot's service cgroup first. If a reset still stops the server, add `KillMode=process` to the systemd unit.
 
 ## Stress test
 
-`/stresstest` takes a snapshot, then runs load bursts in the overworld, nether, and end (fills, chunk loading, mobs, explosions, etc.). The world is restored from the snapshot when the test ends.
+`/stresstest` takes a snapshot, then runs load bursts in the overworld, nether, and end (fills, chunk loading, mobs, explosions, redstone). The world is restored from the snapshot when the test ends.
 
 ## License
 
