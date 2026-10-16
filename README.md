@@ -22,24 +22,106 @@ Discord bot that starts, stops, watches, backs up, and maps a Paper Minecraft se
 
 - Python 3.9+
 - A Paper (or compatible) Minecraft server
-- `tmux` for the console fallback
-- Discord bot token
-- Optional: RCON enabled for player count, idle shutdown, TPS, and console
+- `tmux` (used for the console fallback)
+- A Discord bot token
+- Optional but recommended: RCON enabled on the Minecraft server (for player count, idle shutdown, TPS, and live console)
 
-## Setup
+## How to set up and run
 
-1. Create `.env` next to `botgrok.py` (do not commit it).
-2. Set at least:
-   - `DISCORD_TOKEN`
-   - `DISCORD_GUILD_ID`
-   - Channel IDs (`MC_ALERT_CHANNEL_ID`, `MC_LOG_CHANNEL_ID`, etc.)
-   - `MC_RCON_PASSWORD` if you want RCON features
-3. Point `MC_START_SCRIPT`, `MC_LOG_PATH`, and `MC_SERVER_DIR` at your server.
-4. Run:
-   ```bash
-   python3 botgrok.py
-   ```
-   Or use a systemd unit.
+### 1. Get the code
+
+```bash
+git clone https://github.com/Spharax/mc-bot.git
+cd mc-bot
+```
+
+### 2. Create a Discord bot
+
+1. Go to the [Discord Developer Portal](https://discord.com/developers/applications).
+2. Create a new application → Bot → copy the **Token**.
+3. Under OAuth2 → URL Generator, select the `bot` and `applications.commands` scopes and invite the bot to your server.
+4. Note your server (guild) ID and the channel IDs you want to use for alerts, logs, etc.
+
+### 3. Create the `.env` file
+
+Create a file named `.env` in the same folder as `botgrok.py` (do **not** commit this file):
+
+```bash
+# Required
+DISCORD_TOKEN=your_bot_token_here
+DISCORD_GUILD_ID=123456789012345678
+
+# Recommended channel IDs
+MC_ALERT_CHANNEL_ID=123456789012345678
+MC_LOG_CHANNEL_ID=123456789012345678
+MC_AUDIT_CHANNEL_ID=123456789012345678
+
+# Minecraft / server paths (adjust to your setup)
+MC_START_SCRIPT=/path/to/your/start-mc.sh
+MC_LOG_PATH=/path/to/minecraft/logs/latest.log
+MC_SERVER_DIR=/path/to/minecraft
+
+# RCON (optional but enables many features)
+MC_RCON_HOST=127.0.0.1
+MC_RCON_PORT=25575
+MC_RCON_PASSWORD=your_rcon_password
+```
+
+See the table below and the docstring at the top of `botgrok.py` for the full list of variables and their defaults.
+
+### 4. Enable RCON (optional but recommended)
+
+In your Minecraft `server.properties`:
+
+```
+enable-rcon=true
+rcon.port=25575
+rcon.password=your_rcon_password
+```
+
+Restart the Minecraft server after changing this.
+
+### 5. Run the bot
+
+```bash
+python3 botgrok.py
+```
+
+The bot will sync its slash commands to the guild you set in `DISCORD_GUILD_ID` and start monitoring.
+
+### 6. Run it permanently (recommended)
+
+Use `tmux`, `screen`, or a systemd service so it survives logout:
+
+**tmux example:**
+```bash
+tmux new -s mcbot
+python3 botgrok.py
+# Detach with Ctrl+B then D
+```
+
+**Simple systemd unit** (save as `/etc/systemd/system/mc-bot.service`):
+```ini
+[Unit]
+Description=mc-bot Discord Minecraft controller
+After=network.target
+
+[Service]
+Type=simple
+User=youruser
+WorkingDirectory=/path/to/mc-bot
+ExecStart=/usr/bin/python3 /path/to/mc-bot/botgrok.py
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Then:
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now mc-bot
+```
 
 ## Important environment variables
 
