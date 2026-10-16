@@ -101,11 +101,11 @@ Environment (see .env next to this file):
 
 Commands are refused in DMs. When DISCORD_GUILD_ID is set, other servers are
 refused too. Every command is open to members of that server except /backup
-list, /backup restore, console, serveredit and botstop, which need
-MC_ADMIN_ROLE_ID (or the Administrator permission when it is unset). Stop and
-restart ask for confirmation first. /ping only accepts a public IP. In game,
-any player can type !backup (one per MC_CHAT_BACKUP_COOLDOWN), !pingall and !tps
-while MC_CHAT_BACKUP is on.
+list, /backup restore, /console, /serveredit, /logdelete and /botstop, which
+need MC_ADMIN_ROLE_ID (or the Administrator permission when it is unset). Stop
+and restart ask for confirmation first. /ping only accepts a public IP. In
+game, any player can type !backup (one per MC_CHAT_BACKUP_COOLDOWN), !start,
+!pingall, !tps and !chatclear while MC_CHAT_BACKUP is on.
 Permission and busy checks run before the first await and every long command
 defers right after them, so Discord does not expire the interaction (error
 10062) and refusals stay private (an ephemeral reply is only honoured if it is
